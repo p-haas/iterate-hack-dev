@@ -14,6 +14,7 @@ from .dataset_store import (
     load_dataset_context,
     persist_dataset_file,
     save_dataset_context,
+    save_smart_fix_response,
     resolve_raw_path,
 )
 from .excel_context import build_excel_context
@@ -136,6 +137,18 @@ class ApplyIssuesResponse(BaseModel):
     applied: List[str]
     skipped: List[str]
     message: str
+
+
+class SmartFixRequest(BaseModel):
+    issueId: str
+    response: str
+
+
+class SmartFixResponse(BaseModel):
+    dataset_id: str
+    issue_id: str
+    response: str
+    updated_at: str
 
 class ChatDatasetRequest(BaseModel):
     session_id: str
@@ -328,6 +341,16 @@ def _load_applied_issues(dataset_id: str) -> List[str]:
         return []
     data = json.loads(path.read_text(encoding="utf-8"))
     return data.get("applied", [])
+
+
+def _persist_smart_fix_response(dataset_id: str, issue_id: str, response: str) -> SmartFixResponse:
+    saved = save_smart_fix_response(DATA_DIR, dataset_id, issue_id, response)
+    return SmartFixResponse(
+        dataset_id=dataset_id,
+        issue_id=issue_id,
+        response=saved["response"],
+        updated_at=saved["updated_at"],
+    )
 
 
 @app.get("/datasets/{dataset_id}/understanding", response_model=DatasetUnderstandingResponse)
@@ -544,6 +567,29 @@ def apply_dataset_changes(dataset_id: str, payload: ApplyIssuesRequest):
         skipped=skipped,
         message=message,
     )
+
+
+@app.post("/datasets/{dataset_id}/smart-fix", response_model=SmartFixResponse)
+def submit_smart_fix_response(dataset_id: str, payload: SmartFixRequest):
+    try:
+        load_dataset_metadata(DATA_DIR, dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if not payload.issueId or not payload.response.strip():
+        raise HTTPException(status_code=400, detail="issueId et response sont requis.")
+
+    try:
+        analysis = _load_analysis_result(dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    issue_ids = {issue.id for issue in analysis.issues if issue.category == "smart_fixes"}
+    if payload.issueId not in issue_ids:
+        raise HTTPException(status_code=400, detail="issueId inconnu ou non éligible aux smart fixes.")
+
+    saved = _persist_smart_fix_response(dataset_id, payload.issueId, payload.response.strip())
+    return saved
 
 
 @app.post("/chat", response_model=ChatResponse)

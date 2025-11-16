@@ -149,3 +149,25 @@ def dataset_dir_path(data_dir: Path, dataset_id: str) -> Path:
     if not path.exists():
         raise FileNotFoundError(f"Dataset {dataset_id} introuvable")
     return path
+
+
+def save_smart_fix_response(
+    data_dir: Path,
+    dataset_id: str,
+    issue_id: str,
+    response: str,
+) -> dict:
+    dataset_dir = dataset_dir_path(data_dir, dataset_id)
+    path = dataset_dir / "smart_fix_responses.json"
+    existing = {}
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+
+    existing[issue_id] = {
+        "issue_id": issue_id,
+        "response": response,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    return existing[issue_id]
