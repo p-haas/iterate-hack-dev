@@ -25,12 +25,12 @@ With the FastAPI backend endpoints now live, this plan enumerates the work neede
 
 **Deliverable/Test**: After uploading, refreshing the page still shows the backend summary because the step fetches live data. (✅ Verified on 2025-11-16 — page now renders backend row/column counts instead of the fallback error.)
 
-## 4. Context Persistence
+## 4. Context Persistence ✅
 
 - Implement `saveContext` to POST to `/datasets/{datasetId}/context` and optionally add a GET in the step initialization to preload any saved context.
 - Ensure toast notifications reflect actual success/failure from the backend.
 
-**Deliverable/Test**: Entering instructions and pressing “Save & Continue” stores them; reloading the page shows the saved text via the GET endpoint.
+**Deliverable/Test**: Entering instructions and pressing “Save & Continue” stores them; reloading the page shows the saved text via the GET endpoint. (✅ Verified on 2025-11-16.)
 
 ## 5. Analysis Streaming
 
