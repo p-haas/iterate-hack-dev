@@ -9,62 +9,116 @@
 
 ## 🎯 Overview
 
-The Iterate Backend is a FastAPI-based service that leverages **autonomous AI agents** to provide intelligent, context-aware data quality analysis for tabular datasets (CSV/Excel). Unlike traditional rule-based systems, our agentic architecture enables:
+The Iterate Backend is a FastAPI-based service that leverages **specialized code-generation AI agents** to provide intelligent, context-aware data quality analysis for tabular datasets (CSV/Excel). Unlike traditional approaches that pass entire datasets to LLMs or use simple rule-based heuristics, our innovative architecture:
 
-- **Autonomous Dataset Understanding**: AI agents analyze datasets to generate business-focused summaries and column descriptions
-- **Intelligent Error Detection**: Multi-stage agent pipeline for detecting missing values, duplicates, anomalies, and business logic issues
-- **Code-Based Investigations**: Agents generate and execute Python code in secure sandboxes to validate hypotheses
-- **Guided Remediation**: Smart fix workflows that engage users in conversational problem-solving
-- **Contextual Chat**: MongoDB-backed conversational interface with dataset context awareness
+**Uses LLMs as Code Generators, Not Data Processors**:
+- **Specialized Agent System**: Multiple LLM agents (error analysis, correction, dataset summary) guided by system prompts
+- **Code Generation over Data Ingestion**: Agents generate Python analysis scripts based on dataset metadata and small samples (10-20 rows)
+- **Local Script Execution**: Generated scripts run locally on the **full dataset**, avoiding token window limitations
+- **Deterministic Analysis**: Code-based approach eliminates LLM hallucination—scripts produce consistent, verifiable results
+- **Scalability**: Analyzes datasets of any size without context limits (millions of rows supported)
+
+**Key Capabilities**:
+- **Dataset Understanding Agent**: Generates business-focused summaries from schema and samples
+- **Error Analysis Agent**: Creates comprehensive validation scripts to detect data quality issues
+- **Error Correction Agent**: Generates remediation scripts based on detected errors
+- **Guided Remediation**: Smart fix workflows with conversational user guidance
+- **Contextual Chat**: MongoDB-backed interface with dataset context awareness
 
 ## 🏗️ Architecture
 
-### AI Agent Pipeline
+### Code-Generation Agent Pipeline
 
-The system employs a **multi-agent architecture** with specialized agents for different analysis stages:
+The system employs a **multi-agent code-generation architecture** where LLMs generate Python scripts instead of processing data directly:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                     Dataset Upload                            │
 │              (CSV/Excel → Pandas → Storage)                   │
+│              Extract: Schema + 10-20 Sample Rows              │
 └───────────────────────────┬──────────────────────────────────┘
                             │
                             ▼
 ┌──────────────────────────────────────────────────────────────┐
-│              🤖 Dataset Understanding Agent                   │
-│  • Analyzes structure, types, sample data                    │
-│  • Generates business-focused descriptions                   │
-│  • Identifies domain & use case                              │
-│  Output: DatasetUnderstandingModel                           │
+│         🤖 Dataset Understanding Agent (LLM)                  │
+│  Input: Column names, types, 10-20 sample rows, metadata     │
+│  Process: LLM analyzes structure and business context        │
+│  Output: Business-focused summary (no code generation)       │
 └───────────────────────────┬──────────────────────────────────┘
                             │
                             ▼
 ┌──────────────────────────────────────────────────────────────┐
-│              🤖 Analysis Issues Agent                         │
-│  • Detects data quality issues                               │
-│  • Classifies by severity & category                         │
-│  • Generates remediation suggestions                         │
-│  Output: AnalysisResultModel (list of issues)                │
+│         🤖 Error Analysis Code Generator (LLM)                │
+│  Input: Column names, dataset summary, sample rows           │
+│  Process: LLM generates complete Python validation script    │
+│  Output: detect_errors.py (executable script)                │
+│                                                               │
+│  Generated script includes:                                  │
+│  • check_missing_values()   • check_duplicates()             │
+│  • check_basic_types()      • check_value_ranges()           │
+│  • check_category_drifts()  • check_id_consistency()         │
+│  • + LLM's custom validation functions                       │
 └───────────────────────────┬──────────────────────────────────┘
                             │
                             ▼
 ┌──────────────────────────────────────────────────────────────┐
-│         🤖 Code Execution Investigation Agent                │
-│  • Generates Python analysis scripts                         │
-│  • Executes in Claude's secure sandbox                       │
-│  • Validates hypotheses with real data                       │
-│  Output: Enhanced issues with investigation results          │
+│              ⚙️ Local Script Execution Engine                │
+│  • Runs generated script on FULL dataset (all rows)          │
+│  • No token limits - processes millions of rows              │
+│  • Deterministic results (no LLM hallucination)              │
+│  • Captures: Error counts, affected rows, examples           │
+│  Output: Structured error report with evidence               │
 └───────────────────────────┬──────────────────────────────────┘
                             │
                             ▼
 ┌──────────────────────────────────────────────────────────────┐
-│              🤖 Smart Fix Follow-up Agent                     │
-│  • Generates contextual questions                            │
-│  • Provides guided remediation options                       │
-│  • Adapts based on user responses                            │
-│  Output: SmartFixFollowupModel                               │
+│      🤖 Error Correction Code Generator (LLM)                 │
+│  Input: Error report, column names, conversation context     │
+│  Process: LLM generates Python remediation script            │
+│  Output: fix_errors.py (executable correction script)        │
+│                                                               │
+│  Generated script includes:                                  │
+│  • Data loading and validation                               │
+│  • Targeted fixes for detected issues                        │
+│  • Data integrity checks                                     │
+│  • Export corrected dataset                                  │
+└───────────────────────────┬──────────────────────────────────┘
+                            │
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│              🤖 Smart Fix Follow-up Agent (LLM)               │
+│  • Generates contextual questions for ambiguous issues       │
+│  • Guides users through correction decisions                 │
+│  • Adapts generated code based on user responses             │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+**Key Innovation**: LLMs generate analysis code from small samples (10-20 rows), then scripts execute locally on full datasets—combining LLM intelligence with code determinism.
+
+### Why This Architecture Matters
+
+**The Problem with Traditional Approaches**:
+
+| Approach | Method | Limitations |
+|----------|--------|-------------|
+| **Rule-Based** | Hardcoded validation rules | ❌ Inflexible, can't adapt to different domains<br>❌ Misses context-specific issues<br>❌ No business intelligence |
+| **Full Data to LLM** | Send entire dataset to AI | ❌ Token limits (200k max)<br>❌ Can't handle large datasets<br>❌ LLM hallucination risks<br>❌ Expensive and slow |
+| **Sampling to LLM** | Send data samples to AI | ❌ May miss issues in unsampled rows<br>❌ Still limited by tokens<br>❌ Hallucination on statistical claims |
+
+**Our Code-Generation Approach**:
+
+| Advantage | How It Works | Benefits |
+|-----------|--------------|----------|
+| **Unlimited Scale** | LLM generates code from small sample<br>→ Script runs on full dataset locally | ✅ Analyze millions of rows<br>✅ No token limits<br>✅ Fast execution |
+| **Zero Hallucination** | LLM writes deterministic Python code<br>→ Pandas processes actual data | ✅ Verifiable results<br>✅ Consistent outputs<br>✅ Code is reviewable |
+| **Intelligent + Deterministic** | LLM adds custom validation logic<br>→ Code executes deterministically | ✅ Domain-aware checks<br>✅ Reliable execution<br>✅ Best of both worlds |
+| **Cost Effective** | One LLM call generates script<br>→ Script runs unlimited times | ✅ Low API costs<br>✅ Reusable scripts<br>✅ No per-row charges |
+| **Transparent** | Generated code is visible<br>→ Users can review/modify | ✅ Explainable AI<br>✅ User control<br>✅ Trust through transparency |
+
+**Real-World Impact**:
+- **Dataset Size**: 1M rows × 50 columns
+- **Traditional LLM**: Impossible (exceeds token limit)
+- **Our Approach**: ✅ LLM sees 20 rows, generates script, script processes all 1M rows in seconds
 
 ### Technology Stack
 
@@ -74,9 +128,10 @@ The system employs a **multi-agent architecture** with specialized agents for di
 - **Pandas**: Dataframe processing and CSV/Excel handling
 
 **AI & Agent Infrastructure**
-- **Anthropic Claude 4.5 Haiku**: Primary LLM for agent reasoning
+- **Anthropic Claude 4.5 Haiku**: Primary LLM for code generation (analysis & correction scripts)
 - **LangChain**: Agent orchestration and prompt management
-- **Native Code Execution**: Anthropic's secure sandbox for Python execution
+- **Local Python Execution**: Generated scripts run on full datasets without token limits
+- **Specialized Agents**: Located in `app/tools.py` with guided system prompts
 
 **Data Persistence**
 - **MongoDB**: Chat history and conversation state
@@ -239,90 +294,180 @@ Generate contextual follow-up questions for complex issues.
 
 **Response**: `SmartFixFollowupModel` with next question and options
 
-## 🤖 AI Agent System
+## 🤖 AI Agent System - Code Generation Architecture
+
+### Why Code Generation Instead of Direct Data Processing?
+
+Traditional approaches send entire datasets to LLMs, which creates problems:
+- **Token Limits**: Claude's 200k token limit can't handle large datasets
+- **Hallucination**: LLMs may invent patterns or values that don't exist
+- **Cost**: Processing millions of rows through LLM API is expensive
+- **Speed**: Multiple LLM calls for large datasets are slow
+
+**Our Solution**: LLMs generate Python code that runs locally on full datasets
+- ✅ Analyze unlimited dataset sizes (millions of rows)
+- ✅ Deterministic results (code doesn't hallucinate)
+- ✅ Low cost (one LLM call generates script, script runs locally)
+- ✅ Fast execution (pandas processes data efficiently)
+- ✅ Verifiable (users can review/modify generated scripts)
+
+---
 
 ### Agent Architecture Details
 
 #### 1. Dataset Understanding Agent
 
-**Purpose**: Generate business-focused understanding of uploaded datasets
+**Purpose**: Generate business-focused understanding from minimal dataset samples
 
 **Input**:
 - Dataset metadata (rows, columns, file type)
-- Sample rows (max 1000 for large datasets)
-- Column statistics and type inference
+- **10-20 sample rows only** (critical: avoids token limits)
+- Column names, types, basic statistics
 - User-provided context
 
-**Process**:
-1. Analyzes data structure and patterns
+**Process** (No Code Generation):
+1. LLM analyzes structure and patterns from minimal sample
 2. Infers business domain and use case
 3. Generates human-readable descriptions
 4. Identifies key observations
 
 **Output**: Structured `DatasetUnderstandingModel`
 
-**Configuration**:
-- Temperature: 0.1 (low for consistency)
-- Timeout: 30 seconds
-- Retries: 2 attempts
-- Validation: Strict Pydantic schema
+**Why Small Samples Work**:
+- Schema and column types visible in 10-20 rows
+- Business context inferable from column names + samples
+- Fast (<5s) and low-cost (<2k tokens)
 
-#### 2. Analysis Issues Agent
+---
 
-**Purpose**: Detect and categorize data quality issues
+#### 2. Error Analysis Code Generation Agent
 
-**Detection Categories**:
-- **Quick Fixes**: Automated resolution (missing values, duplicates, formatting)
-- **Smart Fixes**: Requires business judgment (anomalies, context misalignment)
+**Location**: `app/tools.py` → `generate_error_analysis_script()`
 
-**Issue Severity Levels**:
-- `high`: Blocks analysis or indicates critical errors
-- `medium`: May lead to incorrect insights
-- `low`: Minor inconsistencies
+**Purpose**: Generate comprehensive Python validation scripts
 
-**Process**:
-1. Receives dataset understanding from previous agent
-2. Applies domain-aware heuristics
-3. Generates hypotheses for each potential issue
-4. Optionally triggers code investigations
-5. Classifies and prioritizes issues
+**Input to LLM**:
+- Exact column names
+- Dataset metadata/description from understanding agent
+- **10-20 sample rows** (not full dataset!)
+- File type and delimiter
 
-**Output**: `AnalysisResultModel` with categorized issues
+**LLM Task** (Guided by System Prompts):
+Generates complete, executable Python script with:
 
-#### 3. Code Execution Investigation Agent
+**Standard Validation Functions** (LLM implements these):
+- `check_missing_values()` - NaN detection with row indices
+- `check_duplicates()` - Exact duplicate rows
+- `check_basic_types()` - Type consistency validation
+- `check_value_ranges()` - Age/quantity/price range checks
+- `check_allowed_categories()` - Rare/suspicious category detection
+- `check_id_consistency()` - Same ID must have consistent values
+- `check_product_whitespace()` - Leading/trailing/multiple spaces
+- `check_category_drifts()` - Category changes over time
+- `check_near_duplicate_rows()` - Near-duplicates (timestamp diffs)
 
-**Purpose**: Validate hypotheses through secure Python code execution
+**LLM Freedom**: Add custom validation functions based on dataset understanding
 
-**Capabilities**:
-- Generate pandas analysis scripts
-- Execute in Anthropic's native sandbox
-- Handle datasets up to 120k tokens (~60k rows)
-- Extract specific metrics and evidence
+**Output from LLM**: Complete `detect_errors.py` script (as string)
 
-**Example Investigation Flow**:
-```python
-# Agent generates code like:
-import pandas as pd
-
-# Load and analyze
-df = pd.read_csv('dataset.csv')
-missing_pct = df['revenue'].isna().sum() / len(df) * 100
-
-# Return structured result
-{
-    "missing_percentage": missing_pct,
-    "affected_rows": df['revenue'].isna().sum(),
-    "example_indices": df[df['revenue'].isna()].index[:5].tolist()
-}
+**Local Execution** (NOT in LLM):
+```bash
+python detect_errors.py /path/to/full_dataset.csv
 ```
 
-**Safety Guardrails**:
-- Sandboxed execution (no network, no filesystem)
-- Token budget limits
-- Execution timeouts
-- Output sanitization
+**Script Runs On**:
+- **Full dataset** (no row limits, millions of rows supported)
+- Local Python environment with pandas
+- Deterministic - same dataset = same results
 
-**Output**: Enhanced issues with `investigation` field containing code, results, and execution metrics
+**Script Returns**:
+Structured error report:
+```
+[MISSING_VALUES] ERROR: Column 'Product' has 234 missing values. Example rows: [12, 45, 67]
+[DUPLICATE_ROWS] ERROR: 15 exact duplicate rows found. Example rows: [100, 101, 205]
+[CATEGORY_DRIFT] WARNING: Product 'ABC123' changed category from 'OTC' to 'OTC:Cold&Flu' at rows [45, 78]
+[ID_INCONSISTENCY] ERROR: ID '42' has inconsistent 'price' values: [9.99 (row 10), 12.50 (row 25)]
+```
+
+**Key Advantages**:
+- ✅ No token limits - analyzes entire dataset
+- ✅ Deterministic - code produces consistent results
+- ✅ LLM adds intelligence (custom checks) without seeing all data
+- ✅ Verifiable - script is reviewable, modifiable, re-runnable
+
+---
+
+#### 3. Error Correction Code Generation Agent
+
+**Location**: `app/tools.py` → `generate_error_correction_script()`
+
+**Purpose**: Generate Python scripts to fix detected issues
+
+**Input to LLM**:
+- Exact column names
+- **Error report from executed analysis script**
+- Conversation history (user decisions on fixes)
+- Dataset metadata
+
+**LLM Task**:
+Generates correction script that:
+- Takes input/output file paths as CLI arguments
+- Loads dataset with pandas
+- Applies targeted fixes:
+  - Fill missing values (forward-fill, mean, mode, custom logic)
+  - Remove or consolidate duplicates
+  - Standardize formats (dates, categories, whitespace)
+  - Fix type inconsistencies
+  - Correct value ranges
+  - Merge category variations
+- Validates corrections
+- Exports cleaned dataset
+
+**Output from LLM**: Complete `fix_errors.py` script (as string)
+
+**Local Execution**:
+```bash
+python fix_errors.py input.csv output_cleaned.csv
+```
+
+**Example Generated Code**:
+```python
+import pandas as pd
+import sys
+
+def fix_missing_products(df):
+    # Fill using barcode dictionary
+    df['Product'] = df['Product'].fillna(
+        df['Barcode'].map(barcode_lookup)
+    )
+    return df
+
+def standardize_categories(df):
+    # Merge variations
+    df['Dept'] = df['Dept'].replace({
+        'OTC': 'OTC:General',
+        'OTC:Cold&Flu': 'OTC:General'
+    })
+    return df
+
+def main():
+    df = pd.read_csv(sys.argv[1])
+    df = fix_missing_products(df)
+    df = remove_duplicates(df)
+    df = standardize_categories(df)
+    df.to_csv(sys.argv[2], index=False)
+
+if __name__ == "__main__":
+    main()
+```
+
+**Benefits**:
+- ✅ Corrections applied to full dataset deterministically
+- ✅ User can review/modify script before running
+- ✅ Reproducible - same script = same corrections
+- ✅ No data sent to LLM during correction
+
+---
 
 #### 4. Smart Fix Follow-up Agent
 

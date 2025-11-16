@@ -1,53 +1,484 @@
-# Code Execution System
+# Code Execution System - Local Script Execution
 
 ## Overview
 
-The Iterate backend uses **Anthropic's native code execution tool** to enable AI agents to generate and run Python analysis scripts in a secure sandboxed environment. This capability allows the system to validate hypotheses with actual data rather than relying solely on heuristics.
+The Iterate backend uses **local Python script execution** to run AI-generated validation and remediation scripts on full datasets. Unlike traditional approaches where LLMs process data directly (limited by token windows), our system generates code that executes locally, providing unlimited scalability and deterministic results.
 
-## Why Code Execution?
+## Why Local Code Execution?
 
-Traditional data quality tools use static rules:
-- "If >10% missing values → flag as issue"
-- "If duplicate rows → always suggest removal"
+### The Token Limit Problem
 
-**Problems with static rules**:
-- ❌ No context awareness (business vs. technical duplicates)
-- ❌ False positives (intentional missing values)
-- ❌ Can't validate complex patterns
-- ❌ Limited to predefined checks
+**Traditional LLM Data Processing**:
+```
+User uploads 1M row dataset
+  ↓
+Send all rows to LLM (IMPOSSIBLE - exceeds token limit)
+  ↓
+Alternative: Sample 1000 rows (INCOMPLETE - misses rare issues)
+  ↓
+LLM analyzes sample (UNRELIABLE - hallucination risk)
+```
 
-**Code execution enables**:
-- ✅ **Hypothesis validation**: "Are these duplicates meaningful?"
-- ✅ **Custom metrics**: Calculate domain-specific thresholds
-- ✅ **Evidence extraction**: Find specific examples of issues
-- ✅ **Adaptive analysis**: Adjust detection based on data patterns
+**Problems**:
+- ❌ Token limits (200k max) can't handle large datasets
+- ❌ Sampling misses edge cases and rare errors
+- ❌ LLM hallucination creates false positives
+- ❌ High cost ($50+ for 1M rows at $0.05/1k tokens)
+- ❌ Slow (multiple API calls for iteration)
+
+### Our Code Generation Solution
+
+```
+User uploads 1M row dataset
+  ↓
+Extract 10-20 row sample + metadata
+  ↓
+LLM generates Python validation script (~$0.001)
+  ↓
+Script executes LOCALLY on full 1M rows (~5 seconds)
+  ↓
+Deterministic, verifiable results
+```
+
+**Advantages**:
+- ✅ **No token limits**: Script runs on unlimited rows
+- ✅ **Complete analysis**: Every row validated
+- ✅ **Deterministic**: Code doesn't hallucinate
+- ✅ **Low cost**: One generation, unlimited executions
+- ✅ **Fast**: Pandas processes millions of rows efficiently
+- ✅ **Auditable**: Generated code is inspectable
 
 ## Architecture
 
-### System Components
+### Code-Generation Pipeline
 
 ```
-┌───────────────────────────────────────────────────────────────┐
-│                    Analysis Agent                             │
-│  Generates hypothesis: "Missing values may indicate errors"   │
-└────────────────────────────┬──────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Step 1: Sample Extraction                                      │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ Full Dataset (1M rows) → Extract 10-20 sample rows       │  │
+│  │ + column names + metadata                                 │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
-┌───────────────────────────────────────────────────────────────┐
-│              Code Generation Agent (LLM)                      │
-│  Input: Dataset schema, hypothesis, sample data               │
-│  Output: Python pandas script                                 │
-│                                                                │
-│  Example generated code:                                      │
-│  ┌────────────────────────────────────────────────────────┐   │
-│  │ import pandas as pd                                    │   │
-│  │ import json                                            │   │
-│  │                                                         │   │
-│  │ df = pd.read_csv('data.csv')                           │   │
-│  │ missing = df['revenue'].isna()                         │   │
-│  │                                                         │   │
-│  │ result = {                                             │   │
-│  │     "count": int(missing.sum()),                       │   │
+┌─────────────────────────────────────────────────────────────────┐
+│  Step 2: Code Generation Agent (LLM)                            │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ Input:                                                    │  │
+│  │  - 10-20 sample rows                                      │  │
+│  │  - Column names and types                                 │  │
+│  │  - User-provided metadata                                 │  │
+│  │  - System prompt (guides validation functions)           │  │
+│  │                                                           │  │
+│  │ LLM Generates:                                            │  │
+│  │  - Complete executable Python script                     │  │
+│  │  - Validation functions (missing values, duplicates...)  │  │
+│  │  - Domain-specific checks based on data context          │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                                                                  │
+│  Example Generated Script:                                      │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ # LLM generates this entire script                        │  │
+│  │ import pandas as pd                                       │  │
+│  │ import sys                                                │  │
+│  │ import json                                               │  │
+│  │                                                           │  │
+│  │ def check_missing_values(df):                             │  │
+│  │     results = []                                          │  │
+│  │     for col in df.columns:                                │  │
+│  │         missing = df[col].isna().sum()                    │  │
+│  │         if missing > 0:                                    │  │
+│  │             results.append({                              │  │
+│  │                 "type": "missing_value",                  │  │
+│  │                 "column": col,                            │  │
+│  │                 "count": int(missing)                     │  │
+│  │             })                                            │  │
+│  │     return results                                        │  │
+│  │                                                           │  │
+│  │ def check_duplicates(df):                                 │  │
+│  │     duplicates = df[df.duplicated(keep=False)]            │  │
+│  │     if len(duplicates) > 0:                               │  │
+│  │         return [{"type": "duplicates",                    │  │
+│  │                  "count": len(duplicates)}]               │  │
+│  │     return []                                             │  │
+│  │                                                           │  │
+│  │ # LLM may add domain-specific checks                     │  │
+│  │ def check_price_reasonableness(df):                      │  │
+│  │     # Custom logic based on e-commerce context           │  │
+│  │     outliers = df[df['price'] > 10000]                   │  │
+│  │     return [{"type": "price_outlier",                    │  │
+│  │              "count": len(outliers)}]                    │  │
+│  │                                                           │  │
+│  │ def main():                                               │  │
+│  │     df = pd.read_csv(sys.argv[1])  # FULL dataset        │  │
+│  │     errors = []                                           │  │
+│  │     errors.extend(check_missing_values(df))               │  │
+│  │     errors.extend(check_duplicates(df))                   │  │
+│  │     errors.extend(check_price_reasonableness(df))         │  │
+│  │     print(json.dumps({"errors": errors}, indent=2))       │  │
+│  │     sys.exit(1 if errors else 0)                          │  │
+│  │                                                           │  │
+│  │ if __name__ == "__main__":                                │  │
+│  │     main()                                                │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Step 3: Local Script Execution                                 │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │ subprocess.run([                                          │  │
+│  │     "python", "generated_script.py",                      │  │
+│  │     "data/full_dataset.csv"  # 1M rows                    │  │
+│  │ ])                                                        │  │
+│  │                                                           │  │
+│  │ Script Output (stdout):                                   │  │
+│  │ {                                                         │  │
+│  │   "errors": [                                             │  │
+│  │     {"type": "missing_value", "column": "email",          │  │
+│  │      "count": 1234},                                      │  │
+│  │     {"type": "duplicates", "count": 567}                  │  │
+│  │   ]                                                       │  │
+│  │ }                                                         │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Step 4: Results Processing                                     │
+│  Parse JSON output → Store in database → Return to user         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Implementation Details
+
+### 1. Code Generation Agents
+
+**Location**: `app/tools.py`
+
+#### Error Analysis Script Generator
+
+```python
+async def generate_error_analysis_script(
+    dataset_id: str,
+    column_names: List[str],
+    sample_rows: List[Dict],  # Only 10-20 rows
+    metadata: str,
+) -> str:
+    """
+    Generate Python validation script.
+    
+    Key Innovation:
+    - LLM sees tiny sample (low cost)
+    - Script runs on full dataset (unlimited scale)
+    - Deterministic results (no hallucination)
+    """
+    
+    system_prompt = """You are an expert data quality engineer.
+
+Generate a COMPLETE Python script with these validation functions:
+
+REQUIRED FUNCTIONS:
+- check_missing_values(df) - detect null/empty values
+- check_duplicates(df) - find duplicate rows
+- check_data_types(df) - verify type consistency
+- check_value_ranges(df) - detect outliers/anomalies
+- check_category_drifts(df) - validate categorical values
+- check_date_consistency(df) - validate temporal logic
+
+OPTIONAL FUNCTIONS (based on dataset context):
+- Add domain-specific validation functions
+- Use your intelligence to suggest relevant checks
+- Examples: check_email_format(), check_sku_pattern(), etc.
+
+The script MUST:
+1. Accept CSV path as sys.argv[1]
+2. Load FULL dataset with pandas
+3. Run all validation functions
+4. Print JSON results to stdout
+5. Exit with code 0 (no errors) or 1 (errors found)
+
+CRITICAL: This script will process the ENTIRE dataset (millions of rows).
+Use efficient pandas operations, not row-by-row iteration.
+
+Return ONLY executable Python code, no markdown or explanations."""
+
+    user_prompt = f"""Generate validation script for:
+
+Dataset ID: {dataset_id}
+Columns: {json.dumps(column_names)}
+
+Sample Data (first 10-20 rows):
+{json.dumps(sample_rows, indent=2)}
+
+Business Context: {metadata}
+
+Remember: Script will run on FULL dataset locally."""
+
+    # Call LLM to generate code
+    script_content = await _call_agent_with_retry(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt
+    )
+    
+    return script_content
+```
+
+#### Error Correction Script Generator
+
+```python
+async def generate_error_correction_script(
+    dataset_id: str,
+    errors: List[Dict],  # From validation script
+    column_names: List[str],
+    sample_rows: List[Dict],
+    metadata: str,
+) -> str:
+    """
+    Generate Python remediation script.
+    
+    Takes detected errors and creates script to fix them.
+    """
+    
+    system_prompt = """You are an expert data engineer.
+
+Generate a Python script that FIXES the detected errors:
+
+COMMON CORRECTION FUNCTIONS:
+- fill_missing_values(df, strategies) - impute nulls
+- remove_duplicates(df, keep_strategy) - deduplicate
+- fix_data_types(df, type_map) - correct types
+- fix_outliers(df, method) - handle anomalies
+- standardize_categories(df, mappings) - normalize values
+
+The script MUST:
+1. Accept input_path and output_path as arguments
+2. Load original dataset
+3. Apply corrections conservatively
+4. Save fixed_dataset.csv
+5. Generate correction_report.json with details
+
+Log all changes for auditability.
+
+Return ONLY executable Python code."""
+
+    user_prompt = f"""Generate correction script for:
+
+Dataset ID: {dataset_id}
+Detected Errors:
+{json.dumps(errors, indent=2)}
+
+Columns: {json.dumps(column_names)}
+Sample: {json.dumps(sample_rows, indent=2)}
+Context: {metadata}"""
+
+    script_content = await _call_agent_with_retry(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt
+    )
+    
+    return script_content
+```
+
+---
+
+### 2. Local Script Execution
+
+**Location**: `app/code_analysis.py`
+
+#### Script Execution Function
+
+```python
+import subprocess
+import json
+import tempfile
+from pathlib import Path
+
+def execute_validation_script(
+    script_content: str,
+    dataset_path: str,
+    timeout_seconds: int = 300
+) -> Dict:
+    """
+    Execute generated Python script locally on full dataset.
+    
+    Args:
+        script_content: LLM-generated Python code
+        dataset_path: Path to full CSV file
+        timeout_seconds: Max execution time
+    
+    Returns:
+        Parsed JSON results from script output
+    """
+    
+    # Create temporary file for script
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        suffix='.py',
+        delete=False
+    ) as script_file:
+        script_file.write(script_content)
+        script_path = script_file.name
+    
+    try:
+        # Execute script with full dataset
+        result = subprocess.run(
+            ["python", script_path, dataset_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=False  # Don't raise on non-zero exit
+        )
+        
+        # Parse JSON output
+        if result.stdout:
+            return json.loads(result.stdout)
+        else:
+            logger.error(f"Script error: {result.stderr}")
+            raise ValueError(f"Script failed: {result.stderr}")
+            
+    except subprocess.TimeoutExpired:
+        logger.error(f"Script timeout after {timeout_seconds}s")
+        raise
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON output: {result.stdout}")
+        raise
+    finally:
+        # Cleanup temp file
+        Path(script_path).unlink(missing_ok=True)
+```
+
+#### Correction Script Execution
+
+```python
+def execute_correction_script(
+    script_content: str,
+    input_dataset_path: str,
+    output_dataset_path: str,
+    timeout_seconds: int = 600
+) -> Dict:
+    """
+    Execute data remediation script locally.
+    
+    Returns correction report with details of changes.
+    """
+    
+    with tempfile.NamedTemporaryFile(
+        mode='w',
+        suffix='.py',
+        delete=False
+    ) as script_file:
+        script_file.write(script_content)
+        script_path = script_file.name
+    
+    try:
+        result = subprocess.run(
+            ["python", script_path, input_dataset_path, output_dataset_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            check=True
+        )
+        
+        # Read correction report
+        report_path = Path("correction_report.json")
+        if report_path.exists():
+            with open(report_path) as f:
+                return json.load(f)
+        
+        return {"status": "success", "output": result.stdout}
+        
+    finally:
+        Path(script_path).unlink(missing_ok=True)
+        Path("correction_report.json").unlink(missing_ok=True)
+```
+
+---
+
+### 3. Safety and Security
+
+#### Sandboxing Considerations
+
+**Current Implementation**: Local execution without strict sandboxing
+- ✅ Suitable for trusted single-user deployment
+- ✅ Scripts generated by LLM (limited malicious potential)
+- ✅ Timeout protection prevents infinite loops
+- ⚠️ Not suitable for multi-tenant production without additional isolation
+
+**Production Recommendations**:
+1. **Docker Containers**: Run scripts in isolated containers
+2. **Resource Limits**: CPU/memory limits via cgroups
+3. **Filesystem Restrictions**: Read-only access except output directory
+4. **Network Isolation**: No network access for validation scripts
+
+#### Script Validation
+
+```python
+def validate_generated_script(script_content: str) -> bool:
+    """
+    Basic safety checks on generated code.
+    
+    Prevents obvious malicious patterns.
+    """
+    
+    # Forbidden patterns
+    forbidden = [
+        "import os",  # Prevent OS manipulation
+        "import subprocess",  # Prevent subprocess spawning
+        "import socket",  # Prevent network access
+        "open(",  # Only allow pandas read_csv
+        "eval(",  # Prevent code injection
+        "exec(",  # Prevent code execution
+    ]
+    
+    for pattern in forbidden:
+        if pattern in script_content:
+            logger.warning(f"Rejected script with forbidden: {pattern}")
+            return False
+    
+    # Required patterns
+    required = [
+        "import pandas as pd",
+        "def main():",
+        "pd.read_csv"
+    ]
+    
+    for pattern in required:
+        if pattern not in script_content:
+            logger.warning(f"Script missing required: {pattern}")
+            return False
+    
+    return True
+```
+
+#### Timeout Protection
+
+```python
+# In subprocess.run call
+timeout=300  # 5 minutes max
+
+try:
+    result = subprocess.run(..., timeout=timeout)
+except subprocess.TimeoutExpired:
+    logger.error("Script exceeded timeout, terminating")
+    # Cleanup and return error
+│  │     if len(duplicates) > 0:                               │  │
+│  │         return [{"type": "duplicates",                    │  │
+│  │                  "count": len(duplicates)}]               │  │
+│  │     return []                                             │  │
+│  │                                                           │  │
+│  │ def main():                                               │  │
+│  │     df = pd.read_csv(sys.argv[1])  # Load FULL dataset   │  │
+│  │     errors = []                                           │  │
+│  │     errors.extend(check_missing_values(df))               │  │
+│  │     errors.extend(check_duplicates(df))                   │  │
+│  │     print(json.dumps({"errors": errors}))                 │  │
+│  │                                                           │  │
+│  │ if __name__ == "__main__":                                │  │
+│  │     main()                                                │  │
 │  │     "percentage": float(missing.sum() / len(df) * 100),│   │
 │  │     "examples": df[missing].index[:5].tolist()         │   │
 │  │ }                                                       │   │

@@ -1,31 +1,70 @@
-# AI Agent Architecture
+# AI Agent Architecture - Code Generation System
+
+## ⚠️ Important Architecture Update
+
+**This document describes the code-generation agent architecture where LLMs generate Python scripts that execute locally on full datasets.**
+
+**Key Distinction**: Unlike traditional approaches where LLMs process data directly, our agents:
+1. **LLMs Generate Code**: Agents in `app/tools.py` create Python validation/correction scripts
+2. **Scripts Execute Locally**: Generated code runs on the full dataset without token limits
+3. **Deterministic Results**: Code execution eliminates LLM hallucination
+
+For implementation details, see:
+- **Code Generation Agents**: `app/tools.py` (`generate_error_analysis_script`, `generate_error_correction_script`)
+- **System Prompts**: Detailed in `app/tools.py` guiding what validation functions to generate
+- **Updated README**: Comprehensive architecture explanation with diagrams
+
+---
 
 ## Overview
 
-The Iterate backend implements a **multi-agent system** where specialized AI agents collaborate to analyze datasets, detect quality issues, and guide remediation. This document details the technical architecture, design patterns, and implementation specifics of our agentic framework.
+The Iterate backend implements a **code-generation multi-agent system** where specialized LLM agents generate Python scripts for dataset analysis rather than processing data directly. This innovative approach solves key limitations:
+
+**Problems with Direct Data Processing**:
+- ❌ Token limits (200k max) can't handle large datasets
+- ❌ LLM hallucination creates unreliable results
+- ❌ High costs for processing millions of rows
+- ❌ Slow performance with multiple API calls
+
+**Our Code-Generation Solution**:
+- ✅ LLM generates script from 10-20 sample rows
+- ✅ Script executes locally on full dataset (no limits)
+- ✅ Deterministic, verifiable results (code doesn't hallucinate)
+- ✅ Low cost (one API call generates reusable script)
+- ✅ Fast (pandas processes data efficiently)
 
 ## Core Principles
 
-### 1. Agent Autonomy
-Each agent is designed to operate independently with:
-- **Self-contained prompts**: Complete instructions and context in system/user messages
-- **Structured outputs**: Pydantic models enforce schema compliance
-- **Error recovery**: Automatic retries with exponential backoff
-- **Timeout protection**: Async execution with configurable limits
+### 1. Code Generation over Data Processing
+**Traditional Approach**: Send data → LLM → Get analysis
+**Our Approach**: Send sample → LLM → Get code → Execute locally → Get analysis
+
+Agents generate executable Python scripts based on:
+- Dataset schema and column names
+- 10-20 sample rows for context
+- User-provided metadata
+- System prompts guiding validation logic
 
 ### 2. Separation of Concerns
 Agents are specialized by function:
-- **Understanding Agent**: Dataset comprehension and business context
-- **Analysis Agent**: Issue detection and classification
-- **Investigation Agent**: Code generation and execution
-- **Follow-up Agent**: Conversational remediation guidance
+- **Understanding Agent** (`app/agent.py`): Dataset comprehension from samples (no code generation)
+- **Error Analysis Agent** (`app/tools.py`): Generates validation scripts
+- **Error Correction Agent** (`app/tools.py`): Generates remediation scripts
+- **Follow-up Agent** (`app/agent.py`): Conversational guidance for ambiguous fixes
 
-### 3. Contract-Driven Communication
+### 3. Local Execution for Scalability
+Generated scripts run locally using:
+- Standard Python with pandas
+- Full dataset access (no sampling needed)
+- Deterministic execution (same input = same output)
+- subprocess execution with output capture
+
+### 4. Contract-Driven Communication
 All inter-agent and agent-API communication uses strict contracts:
-- Input validation via Pydantic models
+- Input validation via Pydantic models (AnalyzeRequest, UnderstandingResponse, etc.)
 - Output validation before returning to caller
-- Version-tagged schemas for evolution
 - JSON serialization for transport
+- Structured script generation with predictable function signatures
 
 ## Agent Execution Framework
 
@@ -33,21 +72,22 @@ All inter-agent and agent-API communication uses strict contracts:
 
 Located in `app/agent.py`, the framework provides:
 
-#### LLM Configuration
+#### LLM Configuration for Code Generation
 ```python
 def _get_agent_llm() -> ChatAnthropic:
     """Get LangChain LLM configured for agent tasks."""
     return ChatAnthropic(
-        model=settings.claude_model,
-        temperature=0.1,  # Low for consistency
+        model=settings.claude_model,  # Claude 4.5 Haiku
+        temperature=0.0,  # Deterministic code generation
         api_key=settings.anthropic_api_key,
         timeout=settings.agent_timeout_seconds,
-        max_retries=0,  # We handle retries ourselves
+        max_retries=0,  # Custom retry logic
     )
 ```
 
-**Design decisions**:
-- **Low temperature (0.1)**: Structured outputs require consistency
+**Design decisions for code generation**:
+- **Temperature 0.0**: Code must be deterministic and syntactically correct
+- **Claude 4.5 Haiku**: Fast, efficient code generation
 - **No built-in retries**: Custom retry logic with logging
 - **Configurable timeout**: Prevents runaway costs
 
@@ -136,62 +176,31 @@ async def generate_dataset_understanding(...) -> DatasetUnderstandingModel:
 3. **Pydantic validation**: Enforce schema compliance
 4. **Error logging**: Capture raw response for debugging
 
-## Agent Implementations
+## Specialized Agent Implementations
 
 ### 1. Dataset Understanding Agent
 
 **File**: `app/agent.py` → `generate_dataset_understanding()`
 
+**Purpose**: Creates human-readable dataset descriptions from small samples **(does NOT generate code)**
+
 **Responsibilities**:
-- Analyze dataset structure and content
+- Analyze dataset structure from 10-20 rows
 - Generate business-focused descriptions
 - Infer domain and use case
-- Identify key observations
+- Provide context for code generation agents
 
-**Prompt Strategy**:
-```python
-system_prompt = """You are a business data analyst helping non-technical users 
-understand their datasets.
+**Why No Code Generation**: This agent focuses on comprehension and communication, not validation logic. The understanding it produces guides the code-generation agents.
 
-Generate a BUSINESS-FOCUSED analysis that explains what the data represents 
-in plain language.
-
-You MUST return ONLY valid JSON (no markdown, no code fences):
-{
-  "summary": {
-    "name": "filename.csv",
-    "description": "Clear business explanation...",
-    "rowCount": 123,
-    "columnCount": 5,
-    "observations": ["Business insight 1", "Business insight 2"]
-  },
-  "columns": [
-    {
-      "name": "column_name",
-      "dataType": "string|numeric|date|categorical|boolean",
-      "description": "Business meaning (not just data type)",
-      "sampleValues": ["val1", "val2", "val3"]
-    }
-  ],
-  "suggested_context": "2-4 sentence summary of dataset purpose and patterns"
-}
-
-CRITICAL RULES:
-- Use BUSINESS language, not technical jargon
-- Explain WHY columns exist, not just WHAT type they are
-- suggested_context: summarize dataset purpose for business users
-- Return ONLY the JSON, nothing else"""
-```
-
-**Input Data**:
+**Input Data** (Small Sample Only):
 ```python
 user_prompt = f"""Analyze this business dataset:
 
 Dataset: {file_name}
-Total Rows: {row_count:,}
+Total Rows: {row_count:,}  # Note: NOT sent to LLM
 Total Columns: {column_count}
 
-Sample Data (first 5 rows):
+Sample Data (first 5-10 rows ONLY):  # Key: sample, not full data
 {json.dumps(sample_rows, indent=2)}
 
 Column Statistics:
@@ -205,9 +214,282 @@ Generate business-focused understanding JSON."""
 **Output Schema**:
 ```python
 class DatasetUnderstandingModel(BaseModel):
-    summary: DatasetSummaryModel
-    columns: List[ColumnSummaryModel]
-    suggested_context: str
+    summary: DatasetSummaryModel  # Business description
+    columns: List[ColumnSummaryModel]  # Column meanings
+    suggested_context: str  # Dataset purpose
+```
+
+**Key Architectural Point**: This understanding becomes context for script-generating agents but the agent itself doesn't produce executable code.
+
+---
+
+### 2. Error Analysis Code Generation Agent
+
+**File**: `app/tools.py` → `generate_error_analysis_script()`
+
+**Purpose**: **Generates complete Python validation scripts** that execute locally on full datasets
+
+**This is Where Code Generation Happens**:
+```python
+async def generate_error_analysis_script(
+    dataset_id: str,
+    column_names: List[str],
+    sample_rows: List[Dict],  # Only 10-20 rows
+    metadata: str,
+) -> str:
+    """
+    Generate a Python script that validates the FULL dataset.
+    
+    LLM receives: column names + 10-20 sample rows + metadata
+    LLM outputs: Complete executable Python script
+    Script executes: Locally on full dataset (all rows)
+    """
+```
+
+**System Prompt** (Guides What Validation Functions to Generate):
+```python
+system_prompt = """You are an expert data quality engineer generating Python validation scripts.
+
+Generate a COMPLETE, EXECUTABLE Python script with these validation functions:
+- check_missing_values(df) - detect null/empty cells
+- check_duplicates(df) - find duplicate rows  
+- check_data_types(df) - verify expected types
+- check_value_ranges(df) - detect outliers/anomalies
+- check_category_drifts(df) - validate categorical values
+- check_date_consistency(df) - validate temporal logic
+
+IMPORTANT:
+- You MUST include these core functions
+- You MAY add custom validation functions based on the dataset
+- Use your intelligence to suggest domain-specific checks
+- Script will run on the FULL dataset (millions of rows possible)
+- Return errors as structured JSON
+
+The script MUST:
+1. Accept dataset path as command-line argument
+2. Load full CSV with pandas
+3. Run all validation functions
+4. Print JSON results to stdout
+5. Exit with code 0 (success) or 1 (validation errors found)
+
+Return ONLY executable Python code, no explanations."""
+```
+
+**Input Data** (Sample Only):
+```python
+user_prompt = f"""Generate validation script for:
+
+Dataset ID: {dataset_id}
+Columns: {json.dumps(column_names)}
+Sample (10-20 rows): {json.dumps(sample_rows, indent=2)}
+Business Context: {metadata}
+
+Generate script that will run on FULL dataset locally."""
+```
+
+**Generated Script Example**:
+```python
+# This entire script is GENERATED by the LLM
+import pandas as pd
+import sys
+import json
+
+def check_missing_values(df):
+    """LLM generates this function based on columns."""
+    results = []
+    for col in df.columns:
+        missing = df[col].isna().sum()
+        if missing > 0:
+            results.append({
+                "type": "missing_value",
+                "column": col,
+                "count": int(missing),
+                "percentage": float(missing / len(df) * 100)
+            })
+    return results
+
+def check_duplicates(df):
+    """LLM generates duplicate detection logic."""
+    duplicates = df[df.duplicated(keep=False)]
+    if len(duplicates) > 0:
+        return [{
+            "type": "duplicate_rows",
+            "count": len(duplicates),
+            "sample_indices": duplicates.index[:10].tolist()
+        }]
+    return []
+
+# ... LLM generates more check functions based on dataset ...
+
+def main():
+    df = pd.read_csv(sys.argv[1])  # Load FULL dataset
+    
+    errors = []
+    errors.extend(check_missing_values(df))
+    errors.extend(check_duplicates(df))
+    # ... run all validation functions ...
+    
+    print(json.dumps({"errors": errors}, indent=2))
+    sys.exit(1 if errors else 0)
+
+if __name__ == "__main__":
+    main()
+```
+
+**Execution** (Local, Not in Anthropic Sandbox):
+```python
+# In app/code_analysis.py
+result = subprocess.run(
+    ["python", generated_script_path, full_dataset_path],
+    capture_output=True,
+    timeout=300
+)
+errors = json.loads(result.stdout)  # Structured results
+```
+
+**Key Innovation**:
+- ✅ LLM sees 10-20 rows (low token cost)
+- ✅ Script runs on millions of rows (no limits)
+- ✅ Deterministic results (no hallucination)
+- ✅ Reusable script (one generation, many executions)
+
+---
+
+### 3. Error Correction Code Generation Agent
+
+**File**: `app/tools.py` → `generate_error_correction_script()`
+
+**Purpose**: **Generates Python remediation scripts** that fix detected errors
+
+**Similar Pattern to Analysis Agent**:
+```python
+async def generate_error_correction_script(
+    dataset_id: str,
+    errors: List[Dict],  # From validation script
+    column_names: List[str],
+    sample_rows: List[Dict],  # 10-20 rows
+    metadata: str,
+) -> str:
+    """
+    Generate Python script that FIXES errors in the full dataset.
+    
+    LLM receives: detected errors + 10-20 sample rows + columns
+    LLM outputs: Complete remediation script
+    Script executes: Locally, creates fixed_dataset.csv
+    """
+```
+
+**System Prompt** (Guides Correction Logic):
+```python
+system_prompt = """You are an expert data engineer generating data remediation scripts.
+
+Generate a COMPLETE Python script that fixes the detected errors:
+- fill_missing_values(df, strategies) - impute nulls
+- remove_duplicates(df, keep_strategy) - deduplicate
+- fix_data_types(df, type_map) - correct types
+- fix_outliers(df, method) - handle anomalies
+- standardize_categories(df, mappings) - normalize values
+
+IMPORTANT:
+- Script receives the errors found by validation script
+- Apply fixes conservatively (log all changes)
+- Create fixed_dataset.csv with corrections
+- Generate correction_report.json with details
+
+Return ONLY executable Python code."""
+```
+
+**Generated Correction Script**:
+```python
+# LLM generates this entire script
+import pandas as pd
+import sys
+import json
+
+def fill_missing_values(df, strategies):
+    """LLM decides fill strategies based on data."""
+    changes = []
+    for col, strategy in strategies.items():
+        before = df[col].isna().sum()
+        if strategy == "median":
+            df[col].fillna(df[col].median(), inplace=True)
+        elif strategy == "mode":
+            df[col].fillna(df[col].mode()[0], inplace=True)
+        # ... LLM generates logic ...
+        after = df[col].isna().sum()
+        changes.append({"column": col, "filled": before - after})
+    return changes
+
+# ... more fix functions ...
+
+def main():
+    input_path = sys.argv[1]
+    output_path = sys.argv[2]
+    
+    df = pd.read_csv(input_path)  # Load FULL dataset
+    
+    report = {
+        "original_rows": len(df),
+        "changes": []
+    }
+    
+    # Apply fixes
+    report["changes"].extend(fill_missing_values(df, {...}))
+    report["changes"].extend(remove_duplicates(df))
+    
+    # Save fixed dataset
+    df.to_csv(output_path, index=False)
+    
+    # Save report
+    with open("correction_report.json", "w") as f:
+        json.dumps(report, f, indent=2)
+    
+    print(f"Fixed dataset saved to {output_path}")
+
+if __name__ == "__main__":
+    main()
+```
+
+**Execution**:
+```python
+subprocess.run([
+    "python", correction_script_path,
+    original_dataset_path,
+    fixed_dataset_path
+], capture_output=True)
+```
+
+---
+
+### 4. Smart Fix Follow-up Agent
+
+**File**: `app/agent.py` → `generate_smart_fix_followup()`
+
+**Purpose**: Conversational guidance when corrections need user input **(does NOT generate code)**
+
+**Use Case**: When error fixes have multiple valid approaches:
+- "Should I drop duplicates or keep first occurrence?"
+- "How should I fill missing salary values - median, mean, or zero?"
+- "Should I remove outliers or cap them?"
+
+**Prompt Strategy**:
+```python
+system_prompt = """You are a data quality advisor helping users decide on error corrections.
+
+The user has dataset errors that require decisions:
+- Multiple valid correction approaches exist
+- User needs to understand tradeoffs
+- You guide them to best solution
+
+Ask clarifying questions, explain options, suggest best practices.
+DO NOT generate code - you provide guidance only."""
+```
+
+**Output**: Natural language recommendations, not executable scripts.
+
+**Key Distinction**: This agent communicates, doesn't generate code. Once user decides, the Error Correction Code Generation Agent creates the script.
+
+---
 ```
 
 **Design Decisions**:
@@ -679,16 +961,76 @@ Agent Call
 
 ### Fallback to Heuristics
 
-When agents fail, the system uses rule-based analysis:
+When code generation agents fail, the system uses rule-based analysis in `app/backup_analysis.py`:
 
 ```python
 if settings.agent_enabled:
     try:
-        issues = await generate_analysis_issues(...)
+        script = await generate_error_analysis_script(...)
+        # Execute generated script locally
+        issues = execute_validation_script(script, dataset_path)
     except Exception as e:
-        logger.error(f"Agent failed, falling back to heuristics: {e}")
+        logger.error(f"Code generation failed, falling back: {e}")
+        # Simple pandas-based heuristics
         issues = run_backup_analysis(dataset_id)
 else:
+    # Agent disabled, use heuristics directly
+    issues = run_backup_analysis(dataset_id)
+```
+
+**Heuristic Fallback** (`app/backup_analysis.py`):
+- Simple pandas checks (null counts, duplicate counts)
+- No LLM involvement
+- Fast but less intelligent than generated scripts
+- Ensures system always returns results
+
+---
+
+## Architecture Advantages Summary
+
+### Why Code Generation > Direct Data Processing
+
+| Aspect | Direct LLM Processing | Our Code Generation Approach |
+|--------|----------------------|------------------------------|
+| **Dataset Size** | Limited by token window (200k max) | Unlimited (scripts run locally) |
+| **Cost** | High (every row costs tokens) | Low (one script generation) |
+| **Reliability** | Hallucination risk | Deterministic code execution |
+| **Speed** | Slow (API latency per operation) | Fast (pandas processes locally) |
+| **Reusability** | Generate analysis each time | Script reusable across runs |
+| **Verification** | Hard to audit LLM decisions | Code is inspectable/testable |
+| **Scalability** | Doesn't scale to millions of rows | Scales to any dataset size |
+
+### Token Budget Management
+
+**Sample-Based Generation**:
+```
+10-20 rows + column names + metadata = ~5k tokens (input)
+Generated script = ~2k tokens (output)
+Total per dataset: ~7k tokens ≈ $0.001
+```
+
+**vs. Full Dataset Processing**:
+```
+1M rows × average tokens = 50M+ tokens
+Cost: $50+ per analysis
+Impossible due to context limits
+```
+
+### Code Intelligence + LLM Creativity
+
+Our architecture combines:
+- **LLM Intelligence**: Suggests domain-specific validation functions based on dataset context
+- **Code Determinism**: Executes validation consistently without hallucination
+- **System Prompts**: Guide what functions to generate while allowing LLM creativity
+- **Local Execution**: No API limits, full dataset access, fast processing
+
+**Example**: For an e-commerce dataset, the LLM might generate:
+- Standard checks: `check_missing_values()`, `check_duplicates()`
+- Domain-specific: `check_price_reasonableness()`, `check_sku_format()`, `check_inventory_logic()`
+
+The system prompt ensures core functions exist, but the LLM adds valuable dataset-specific logic.
+
+---
     # Agent disabled via config
     issues = run_backup_analysis(dataset_id)
 ```
