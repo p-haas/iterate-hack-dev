@@ -110,14 +110,25 @@ export const AnalysisStep = () => {
     }
   };
 
-  const handleSmartFixResponse = (response: string) => {
-    setSmartFixResponse(response);
-    toast({
-      title: 'Response recorded',
-      description: 'Your answer has been captured for processing',
-    });
-    setSelectedIssue(null);
-    setSmartFixResponse('');
+  const handleSmartFixResponse = async (response: string) => {
+    if (!datasetId || !selectedIssue) return;
+
+    try {
+      await apiClient.submitSmartFix(datasetId, selectedIssue.id, response);
+      toast({
+        title: 'Response recorded',
+        description: 'Your answer has been captured for processing',
+      });
+    } catch (error) {
+      toast({
+        title: 'Failed to save response',
+        description: 'There was an error submitting your answer',
+        variant: 'destructive',
+      });
+    } finally {
+      setSelectedIssue(null);
+      setSmartFixResponse('');
+    }
   };
 
   const renderIssue = (issue: Issue) => {

@@ -154,6 +154,13 @@ class APIClient {
       body: JSON.stringify({ issueIds: acceptedIssueIds }),
     });
   }
+
+  async submitSmartFix(datasetId: string, issueId: string, response: string): Promise<{ issue_id: string; response: string; updated_at: string }> {
+    return this.request<{ issue_id: string; response: string; updated_at: string }>(`/datasets/${datasetId}/smart-fix`, {
+      method: 'POST',
+      body: JSON.stringify({ issueId, response }),
+    });
+  }
 }
 
 export const apiClient = new APIClient();

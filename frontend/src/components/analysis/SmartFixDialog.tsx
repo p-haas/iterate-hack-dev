@@ -9,7 +9,7 @@ interface SmartFixDialogProps {
   issue: Issue | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSubmit: (response: string) => void;
+  onSubmit: (response: string) => Promise<void>;
 }
 
 export const SmartFixDialog = ({ issue, open, onOpenChange, onSubmit }: SmartFixDialogProps) => {
@@ -76,11 +76,11 @@ export const SmartFixDialog = ({ issue, open, onOpenChange, onSubmit }: SmartFix
     }
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (selectedOption === 'custom' && customAnswer) {
-      onSubmit(customAnswer);
+      await onSubmit(customAnswer);
     } else if (selectedOption) {
-      onSubmit(selectedOption);
+      await onSubmit(selectedOption);
     }
   };
 

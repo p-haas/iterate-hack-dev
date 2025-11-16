@@ -20,7 +20,7 @@ const dataTypeColors: Record<Column['dataType'], string> = {
 export const UnderstandingStep = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
-  const { datasetId, fileName, understanding, setUnderstanding, userContext, setUserContext, setCurrentStep } = useDataset();
+  const { datasetId, fileName, understanding, setUnderstanding, userContext, setUserContext, setCurrentStep, setAnalysisResult } = useDataset();
   const { toast } = useToast();
 
   useEffect(() => {
@@ -62,6 +62,7 @@ export const UnderstandingStep = () => {
     setIsSaving(true);
     try {
       await apiClient.saveContext(datasetId, userContext);
+      setAnalysisResult(null);
       toast({
         title: 'Context saved',
         description: 'Your additional context has been saved',
