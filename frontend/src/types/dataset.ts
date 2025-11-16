@@ -5,6 +5,22 @@ export interface Column {
   sampleValues?: string[];
 }
 
+export interface EvidenceExamples {
+  examples_current: string[];
+  examples_fixed: string[];
+  pattern_description?: string;
+  fix_strategy?: string;
+}
+
+export interface InvestigationDetails {
+  code?: string;
+  success?: boolean;
+  output?: unknown;
+  error?: string;
+  execution_time_ms?: number;
+  evidence?: EvidenceExamples;
+}
+
 export interface DatasetSummary {
   name: string;
   description: string;
@@ -30,9 +46,11 @@ export interface Issue {
   category: 'quick_fixes' | 'smart_fixes';
   affectedRows?: number;
   temporalPattern?: string;
+  investigation?: InvestigationDetails;
 }
 
 export interface AnalysisResult {
+  dataset_id?: string;
   issues: Issue[];
   summary: string;
   completedAt?: string;

@@ -1,7 +1,8 @@
 # app/tools.py
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+import json
+from typing import Any, Dict, List, Literal, Optional
 
 from langchain_core.tools import tool
 from langchain_anthropic import ChatAnthropic
@@ -367,4 +368,64 @@ AUCUN texte explicatif, AUCUN ```python``` ou autre balise.
 
 
 # Liste pratique de tools à enregistrer dans ton agent LangChain
+def format_error_report_to_json(
+    dataset_id: str,
+    raw_report: str,
+) -> Dict[str, Any]:
+    """
+    Clean raw script output and convert it into structured JSON matching IssueResponse.
+    """
+    llm = _get_codegen_llm(temperature=0.1)
+    system_prompt = """You are a data quality analyst. Convert noisy text analysis reports into STRICT JSON.
+The JSON MUST match this schema:
+{
+  "dataset_id": "string",
+  "summary": "string",
+  "completedAt": "ISO timestamp",
+  "issues": [
+    {
+      "id": "string",
+      "type": "missing_values|duplicates|outliers|whitespace|supplier_variations|category_drift|near_duplicates|other",
+      "severity": "low|medium|high",
+      "description": "Detailed description referencing concrete values",
+      "affectedColumns": ["col1", "..."],
+      "suggestedAction": "string",
+      "category": "quick_fixes|smart_fixes",
+      "affectedRows": 0,
+      "temporalPattern": "optional string",
+      "investigation": {
+        "code": "Python code snippet or detector description",
+        "success": true,
+        "output": {
+          "sample_rows": [1,2,3]
+        }
+      }
+    }
+  ]
+}
+Rules:
+- Always include dataset_id from the user input.
+- completedAt must be an ISO8601 timestamp (use current UTC time if missing).
+- If the raw text lacks a field, make a best-effort guess but keep data faithful.
+- NEVER include markdown, prose, or code fences. Return pure JSON only."""
+
+    user_prompt = f"""DATASET_ID: {dataset_id}
+
+RAW ANALYSIS LOG:
+-----------------
+{raw_report}
+
+Return ONLY the JSON described above."""
+
+    ai_msg = llm.invoke(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+    )
+
+    cleaned = strip_code_fences(ai_msg.content)
+    return json.loads(cleaned)
+
+
 TOOLS = [generate_error_analysis_script, generate_error_correction_script]

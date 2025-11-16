@@ -19,8 +19,9 @@ from .dataset_store import (
     save_smart_fix_response,
     resolve_raw_path,
 )
+from .backup_analysis import run_backup_analysis
 from .excel_context import build_excel_context
-from .tools import generate_error_analysis_script
+from .tools import generate_error_analysis_script, format_error_report_to_json
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timezone
@@ -41,12 +42,16 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-
 app = FastAPI(title="Claude Excel Context API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://127.0.0.1:8080", "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -106,6 +111,15 @@ class DatasetContextResponse(BaseModel):
     updated_at: str
 
 
+class InvestigationResult(BaseModel):
+    code: Optional[str] = None
+    success: Optional[bool] = None
+    output: Optional[Any] = None
+    error: Optional[str] = None
+    execution_time_ms: Optional[float] = None
+    evidence: Optional[Dict[str, Any]] = None  # Evidence-based examples
+
+
 class IssueResponse(BaseModel):
     id: str
     type: Literal[
@@ -128,6 +142,7 @@ class IssueResponse(BaseModel):
     accepted: Optional[bool] = False
     affectedRows: Optional[int] = None
     temporalPattern: Optional[str] = None
+    investigation: Optional[InvestigationResult] = None
 
 
 class AnalysisResultResponse(BaseModel):
@@ -165,6 +180,7 @@ class SmartFixResponse(BaseModel):
     response: str
     updated_at: str
 
+
 class ChatDatasetRequest(BaseModel):
     session_id: str
     dataset_id: str
@@ -182,11 +198,15 @@ async def upload_dataset(file: UploadFile = File(...)):
     """Persist an uploaded dataset and capture metadata for later steps."""
 
     if not file.filename:
-        raise HTTPException(status_code=400, detail="Le fichier doit avoir un nom valide.")
+        raise HTTPException(
+            status_code=400, detail="Le fichier doit avoir un nom valide."
+        )
 
     extension = Path(file.filename).suffix.lower()
     if extension not in [".csv", ".xlsx", ".xls"]:
-        raise HTTPException(status_code=400, detail="Le fichier doit être un CSV ou un Excel.")
+        raise HTTPException(
+            status_code=400, detail="Le fichier doit être un CSV ou un Excel."
+        )
 
     file_bytes = await file.read()
     delimiter = infer_delimiter(file_bytes) if extension == ".csv" else None
@@ -262,69 +282,6 @@ def _load_dataframe(metadata: dict) -> pd.DataFrame:
     return pd.read_csv(raw_path, delimiter=delimiter)
 
 
-def _generate_missing_value_issues(dataset_id: str, df: pd.DataFrame) -> List[IssueResponse]:
-    issues: List[IssueResponse] = []
-    for column in df.columns:
-        missing = int(df[column].isna().sum())
-        if missing == 0:
-            continue
-        ratio = missing / max(len(df), 1)
-        if ratio > 0.3:
-            severity = "high"
-        elif ratio > 0.1:
-            severity = "medium"
-        else:
-            severity = "low"
-        issue = IssueResponse(
-            id=f"{dataset_id}_missing_{column}",
-            type="missing_values",
-            severity=severity,  # type: ignore[arg-type]
-            description=f"{column} has {missing} missing values ({ratio:.1%}).",
-            affectedColumns=[column],
-            suggestedAction="Fill missing values using forward-fill, interpolation, or drop rows.",
-            category="quick_fixes",
-            affectedRows=missing,
-        )
-        issues.append(issue)
-    return issues
-
-
-def _generate_duplicate_issue(dataset_id: str, df: pd.DataFrame) -> Optional[IssueResponse]:
-    duplicate_rows = int(df.duplicated().sum())
-    if duplicate_rows == 0:
-        return None
-    severity = "medium" if duplicate_rows < len(df) * 0.1 else "high"
-    return IssueResponse(
-        id=f"{dataset_id}_duplicates",
-        type="duplicates",
-        severity=severity,  # type: ignore[arg-type]
-        description=f"Detected {duplicate_rows} duplicate rows.",
-        affectedColumns=list(df.columns),
-        suggestedAction="Remove or deduplicate rows based on business keys.",
-        category="quick_fixes",
-        affectedRows=duplicate_rows,
-    )
-
-
-def _generate_smart_fix_issue(dataset_id: str, context: Optional[dict]) -> Optional[IssueResponse]:
-    if not context:
-        return None
-    instructions = context.get("instructions") if isinstance(context, dict) else None
-    if not instructions:
-        return None
-
-    return IssueResponse(
-        id=f"{dataset_id}_context_alignment",
-        type="discount_context",
-        severity="medium",
-        description="Dataset requires human context to interpret business rules provided by the user.",
-        affectedColumns=list((context.get("column_edits") or {}).keys()) or ["*"],
-        suggestedAction="Review the provided instructions to ensure cleaning aligns with business intent.",
-        category="smart_fixes",
-        temporalPattern=None,
-    )
-
-
 def _persist_analysis_result(dataset_dir: Path, result: AnalysisResultResponse) -> None:
     analysis_path = dataset_dir / "analysis.json"
     analysis_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
@@ -358,7 +315,9 @@ def _load_applied_issues(dataset_id: str) -> List[str]:
     return data.get("applied", [])
 
 
-def _persist_smart_fix_response(dataset_id: str, issue_id: str, response: str) -> SmartFixResponse:
+def _persist_smart_fix_response(
+    dataset_id: str, issue_id: str, response: str
+) -> SmartFixResponse:
     saved = save_smart_fix_response(DATA_DIR, dataset_id, issue_id, response)
     return SmartFixResponse(
         dataset_id=dataset_id,
@@ -368,15 +327,17 @@ def _persist_smart_fix_response(dataset_id: str, issue_id: str, response: str) -
     )
 
 
-@app.get("/datasets/{dataset_id}/understanding", response_model=DatasetUnderstandingResponse)
+@app.get(
+    "/datasets/{dataset_id}/understanding", response_model=DatasetUnderstandingResponse
+)
 async def get_dataset_understanding(dataset_id: str, force_refresh: bool = False):
     """
     Get dataset understanding using AI agent or cached result.
-    
+
     Args:
         dataset_id: Dataset identifier
         force_refresh: Force agent to re-analyze (bypass cache)
-    
+
     Returns:
         DatasetUnderstandingResponse with business-focused descriptions
     """
@@ -387,7 +348,7 @@ async def get_dataset_understanding(dataset_id: str, force_refresh: bool = False
         prepare_column_summaries,
     )
     from .config import settings
-    
+
     try:
         metadata = load_dataset_metadata(DATA_DIR, dataset_id)
     except FileNotFoundError as exc:
@@ -395,7 +356,7 @@ async def get_dataset_understanding(dataset_id: str, force_refresh: bool = False
 
     dataset_dir = dataset_dir_path(DATA_DIR, dataset_id)
     understanding_cache_path = dataset_dir / "understanding.json"
-    
+
     # Try to load from cache first
     if not force_refresh and understanding_cache_path.exists():
         try:
@@ -407,27 +368,26 @@ async def get_dataset_understanding(dataset_id: str, force_refresh: bool = False
         except Exception as e:
             logger.warning(f"Failed to load cached understanding: {e}")
             # Continue to regenerate
-    
+
     # Load and sample dataset
     try:
         df = _load_dataframe(metadata)
     except Exception as exc:
         raise HTTPException(
-            status_code=500,
-            detail=f"Erreur de lecture du dataset: {exc}"
+            status_code=500, detail=f"Erreur de lecture du dataset: {exc}"
         ) from exc
-    
+
     # Smart sampling for large datasets
     original_row_count = len(df)
     sampled_df = smart_sample_dataframe(df, max_sample_rows=300)
     logger.info(
         f"Sampled {len(sampled_df)} rows from {original_row_count} for analysis"
     )
-    
+
     # Prepare inputs for agent
     sample_rows = prepare_sample_rows(sampled_df, max_rows=5)
     column_summaries = prepare_column_summaries(sampled_df)
-    
+
     # Try agent-powered understanding if enabled
     if settings.agent_enabled:
         try:
@@ -441,7 +401,7 @@ async def get_dataset_understanding(dataset_id: str, force_refresh: bool = False
                 column_summaries=column_summaries,
                 user_instructions="",
             )
-            
+
             # Convert to response model
             response = DatasetUnderstandingResponse(
                 summary=DatasetSummary(
@@ -462,38 +422,33 @@ async def get_dataset_understanding(dataset_id: str, force_refresh: bool = False
                 ],
                 suggested_context=agent_result.suggested_context,
             )
-            
+
             # Cache the result
             understanding_cache_path.write_text(
-                response.model_dump_json(indent=2),
-                encoding="utf-8"
+                response.model_dump_json(indent=2), encoding="utf-8"
             )
             logger.info(f"Cached agent understanding for {dataset_id}")
-            
+
             return response
-            
+
         except Exception as e:
             logger.error(f"Agent failed for understanding: {e}")
             logger.warning("Falling back to heuristic analysis")
             # Fall through to heuristics
-    
+
     # Fallback: Heuristic-based understanding
     logger.info(f"Using heuristic understanding for {dataset_id}")
     columns = [_build_column_summary(df[col]) for col in df.columns]
-    
+
     missing_counts = df.isna().sum().sort_values(ascending=False)
     observations: List[str] = []
     for col, count in missing_counts.head(3).items():
         if count > 0:
-            observations.append(
-                f"{col} contient {int(count)} valeurs manquantes"
-            )
-    
+            observations.append(f"{col} contient {int(count)} valeurs manquantes")
+
     if not observations:
-        observations.append(
-            "Aucun signal de qualité majeur détecté"
-        )
-    
+        observations.append("Aucun signal de qualité majeur détecté")
+
     summary = DatasetSummary(
         name=metadata.get("original_filename", dataset_id),
         description=f"Dataset importé via {metadata.get('file_type', 'csv').upper()} le {metadata.get('uploaded_at', '')}",
@@ -501,19 +456,18 @@ async def get_dataset_understanding(dataset_id: str, force_refresh: bool = False
         columnCount=int(df.shape[1]),
         observations=observations,
     )
-    
+
     response = DatasetUnderstandingResponse(
         summary=summary,
         columns=columns,
         suggested_context=None,
     )
-    
+
     # Cache heuristic result too
     understanding_cache_path.write_text(
-        response.model_dump_json(indent=2),
-        encoding="utf-8"
+        response.model_dump_json(indent=2), encoding="utf-8"
     )
-    
+
     return response
 
 
@@ -525,12 +479,12 @@ def get_dataset_context(dataset_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     context = load_dataset_context(DATA_DIR, dataset_id)
-    
+
     # Try to get suggested_context from cached understanding
     dataset_dir = dataset_dir_path(DATA_DIR, dataset_id)
     understanding_cache_path = dataset_dir / "understanding.json"
     suggested_context = None
-    
+
     if understanding_cache_path.exists():
         try:
             cached_understanding = json.loads(
@@ -539,7 +493,7 @@ def get_dataset_context(dataset_id: str):
             suggested_context = cached_understanding.get("suggested_context")
         except Exception:
             pass
-    
+
     if context is None:
         context = {
             "dataset_id": dataset_id,
@@ -547,8 +501,7 @@ def get_dataset_context(dataset_id: str):
             "column_edits": None,
             "suggested_context": suggested_context,
             "updated_at": metadata.get(
-                "uploaded_at",
-                datetime.now(timezone.utc).isoformat()
+                "uploaded_at", datetime.now(timezone.utc).isoformat()
             ),
         }
     else:
@@ -582,13 +535,17 @@ def _format_sse_message(message: StreamMessageResponse) -> str:
     return f"data: {message.model_dump_json() }\n\n"
 
 
-async def _analysis_stream_generator(messages: List[StreamMessageResponse]) -> AsyncGenerator[str, None]:
+async def _analysis_stream_generator(
+    messages: List[StreamMessageResponse],
+) -> AsyncGenerator[str, None]:
     for message in messages:
         yield _format_sse_message(message)
         await asyncio.sleep(0.4)
 
 
-def _build_stream_messages(dataset_id: str, df: pd.DataFrame) -> List[StreamMessageResponse]:
+def _build_stream_messages(
+    dataset_id: str, df: pd.DataFrame
+) -> List[StreamMessageResponse]:
     now = datetime.now(timezone.utc)
     messages: List[StreamMessageResponse] = []
 
@@ -623,7 +580,9 @@ async def stream_dataset_analysis(dataset_id: str):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Erreur de lecture du dataset: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Erreur de lecture du dataset: {exc}"
+        ) from exc
 
     messages = _build_stream_messages(dataset_id, df)
     return StreamingResponse(
@@ -640,15 +599,17 @@ async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
     try:
         df = _load_dataframe(metadata)
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Erreur de lecture du dataset: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"Erreur de lecture du dataset: {exc}"
+        ) from exc
 
     context = load_dataset_context(DATA_DIR, dataset_id)
-    
+
     # Try code-based analysis if agent is enabled
     if settings.agent_enabled:
         try:
             from .code_analysis import analyze_dataset_with_code
-            
+
             # Load dataset understanding
             try:
                 understanding_path = DATA_DIR / dataset_id / "understanding.json"
@@ -663,57 +624,50 @@ async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
                         "name": metadata.file_name,
                         "rowCount": len(df),
                         "columnCount": len(df.columns),
-                        "description": "Dataset uploaded for analysis"
+                        "description": "Dataset uploaded for analysis",
                     },
-                    "columns": []
+                    "columns": [],
                 }
-            
+
             # Run code-based analysis
             logger.info(f"Running code-based analysis for {dataset_id}")
             analysis_result = await analyze_dataset_with_code(
                 dataset_id=dataset_id,
                 df=df,
                 dataset_understanding=understanding,
-                user_instructions=context.get("instructions", "")
+                user_instructions=context.get("instructions", ""),
             )
-            
+
             # Convert to expected response format
-            issues = [IssueResponse(**issue) for issue in analysis_result.get("issues", [])]
+            issues = [
+                IssueResponse(**issue) for issue in analysis_result.get("issues", [])
+            ]
             result = AnalysisResultResponse(
                 dataset_id=dataset_id,
                 issues=issues,
                 summary=analysis_result.get("summary", "Analysis complete"),
-                completedAt=analysis_result.get("completedAt", datetime.now(timezone.utc).isoformat()),
+                completedAt=analysis_result.get(
+                    "completedAt", datetime.now(timezone.utc).isoformat()
+                ),
             )
-            
+
             _persist_analysis_result(DATA_DIR / dataset_id, result)
             logger.info(f"Code-based analysis complete: {len(issues)} issues found")
             return result
-            
+
         except Exception as e:
             logger.error(f"Code-based analysis failed: {e}, falling back to heuristics")
             # Fall through to heuristics
-    
-    # Fallback to heuristics
-    logger.info(f"Using heuristic analysis for {dataset_id}")
-    quick_fix_issues = _generate_missing_value_issues(dataset_id, df)
-    duplicate_issue = _generate_duplicate_issue(dataset_id, df)
-    smart_fix_issue = _generate_smart_fix_issue(dataset_id, context)
 
-    issues: List[IssueResponse] = quick_fix_issues
-    if duplicate_issue:
-        issues.append(duplicate_issue)
-    if smart_fix_issue:
-        issues.append(smart_fix_issue)
-
-    completed_at = datetime.now(timezone.utc).isoformat()
-    summary = f"Analysis complete. Found {len(issues)} data quality issues."
-
+    # Fallback: rule-based backup analysis
+    logger.info(f"Using backup rule-based analysis for {dataset_id}")
+    backup_payload = run_backup_analysis(dataset_id, df)
+    issues = [IssueResponse(**issue) for issue in backup_payload["issues"]]
     result = AnalysisResultResponse(
         dataset_id=dataset_id,
         issues=issues,
-        summary=summary,
-        completedAt=completed_at,
+        summary=backup_payload["summary"],
+        completedAt=backup_payload["completedAt"],
     )
 
     _persist_analysis_result(DATA_DIR / dataset_id, result)
@@ -728,6 +682,22 @@ async def analyze_dataset_endpoint(dataset_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return await _run_dataset_analysis(dataset_id)
+
+
+@app.get("/datasets/{dataset_id}/analysis", response_model=AnalysisResultResponse)
+def get_dataset_analysis(dataset_id: str):
+    try:
+        load_dataset_metadata(DATA_DIR, dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    try:
+        return _load_analysis_result(dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Aucune analyse disponible pour ce dataset. Lancez une analyse d'abord.",
+        ) from exc
 
 
 @app.post("/datasets/{dataset_id}/apply", response_model=ApplyIssuesResponse)
@@ -788,11 +758,17 @@ def submit_smart_fix_response(dataset_id: str, payload: SmartFixRequest):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    issue_ids = {issue.id for issue in analysis.issues if issue.category == "smart_fixes"}
+    issue_ids = {
+        issue.id for issue in analysis.issues if issue.category == "smart_fixes"
+    }
     if payload.issueId not in issue_ids:
-        raise HTTPException(status_code=400, detail="issueId inconnu ou non éligible aux smart fixes.")
+        raise HTTPException(
+            status_code=400, detail="issueId inconnu ou non éligible aux smart fixes."
+        )
 
-    saved = _persist_smart_fix_response(dataset_id, payload.issueId, payload.response.strip())
+    saved = _persist_smart_fix_response(
+        dataset_id, payload.issueId, payload.response.strip()
+    )
     return saved
 
 
@@ -842,14 +818,13 @@ async def chat_excel(
     return ChatResponse(reply=reply)
 
 
-
 @app.post("/upload_and_analyze")
 async def upload_and_analyze(
     dataset_id: str = Form(...),
     file: UploadFile = File(...),
     file_type: str = Form("excel"),  # "excel" ou "csv"
     delimiter: str = Form(","),
-    meta_data: str = Form("")
+    meta_data: str = Form(""),
 ):
     """
     Upload le dataset ET lance l'analyse en une seule étape.
@@ -866,7 +841,9 @@ async def upload_and_analyze(
 
     suffix = Path(file.filename).suffix.lower()
     if suffix not in [".xlsx", ".xls", ".csv"]:
-        raise HTTPException(status_code=400, detail="Le fichier doit être un Excel ou un CSV.")
+        raise HTTPException(
+            status_code=400, detail="Le fichier doit être un Excel ou un CSV."
+        )
 
     # 1) Sauvegarder le fichier
     dataset_path = DATA_DIR / f"{dataset_id}{suffix}"
@@ -887,14 +864,15 @@ async def upload_and_analyze(
     metadata = (
         f"Dataset '{dataset_id}' - shape: {df.shape[0]} rows x {df.shape[1]} columns.\n"
         f"Premières lignes (head):\n{df.head(5).to_markdown(index=False)}",
-        f"\nMetadata additionnelle fournie : {meta_data}" if meta_data else ""
+        f"\nMetadata additionnelle fournie : {meta_data}" if meta_data else "",
     )
 
     # 3) Appeler le tool LLM pour générer le script d'analyse
-    script_code = generate_error_analysis_script(   column_names,
-                                                    metadata,
-                                                    effective_file_type,
-                                                    delimiter,
+    script_code = generate_error_analysis_script(
+        column_names,
+        metadata,
+        effective_file_type,
+        delimiter,
     )
 
     # 4) Sauvegarder le script généré
@@ -913,10 +891,15 @@ async def upload_and_analyze(
     if not error_report.strip() and result.stderr:
         error_report = "SCRIPT RUNTIME ERROR:\n" + result.stderr
 
+    formatted_report = None
+    try:
+        formatted_report = format_error_report_to_json(dataset_id, error_report)
+    except Exception as exc:  # pragma: no cover - best-effort formatting
+        logger.warning("Failed to format error report with LLM: %s", exc)
+
     # 6) Sauvegarder le rapport d'erreurs
     error_report_path = DATA_DIR / f"{dataset_id}_errors.txt"
     error_report_path.write_text(error_report, encoding="utf-8")
-
 
     # 7) Retourner infos
     return {
@@ -926,6 +909,7 @@ async def upload_and_analyze(
         "analysis_script_path": str(script_path),
         "error_report_path": str(error_report_path),
         "error_report": error_report,
+        "analysis_json": formatted_report,
     }
 
 
@@ -936,36 +920,28 @@ def chat_dataset(payload: ChatDatasetRequest):
     Utilise le rapport d'erreurs texte comme contexte.
     """
 
-
     error_report_path = DATA_DIR / f"{payload.dataset_id}_errors.txt"
     if not error_report_path.exists():
         raise HTTPException(
             status_code=404,
             detail="Aucun rapport d'erreurs trouvé pour ce dataset_id. "
-                   "Appelle d'abord /upload_and_analyze."
+            "Appelle d'abord /upload_and_analyze.",
         )
-
-    
 
     dataset_path = DATA_DIR / f"{payload.dataset_id}.csv"
     if not dataset_path.exists():
         raise HTTPException(
             status_code=404,
-            detail="Aucun fichier dataset CSV trouvé pour ce dataset_id."
+            detail="Aucun fichier dataset CSV trouvé pour ce dataset_id.",
         )
-
 
     # 2) Charger avec pandas pour récupérer les colonnes + metadata
     df = pd.read_csv(dataset_path)
     effective_file_type = "csv"
-    
 
     column_names = df.columns.tolist()
 
-
     error_report = error_report_path.read_text(encoding="utf-8")
-
-
 
     meta_data = f"""
     Metadata du dataset '{payload.dataset_id}':
@@ -994,12 +970,14 @@ def chat_dataset(payload: ChatDatasetRequest):
 
 class AgentTestRequest(BaseModel):
     """Request model for agent testing endpoint."""
+
     file_content: Optional[str] = None
     sample_csv_rows: Optional[int] = 10
 
 
 class AgentTestResponse(BaseModel):
     """Response model for agent testing endpoint."""
+
     success: bool
     agent_enabled: bool
     execution_time_seconds: float
@@ -1012,13 +990,13 @@ class AgentTestResponse(BaseModel):
 async def test_agent_execution(request: AgentTestRequest = AgentTestRequest()):
     """
     Prototype endpoint to test agent execution on a small dataset.
-    
+
     This endpoint demonstrates the agent sandbox with:
     - Timeout enforcement
     - Retry logic
     - JSON validation
     - Structured error handling
-    
+
     Returns agent-generated dataset understanding and analysis.
     """
     import time
@@ -1027,9 +1005,9 @@ async def test_agent_execution(request: AgentTestRequest = AgentTestRequest()):
         generate_analysis_issues,
     )
     from .config import settings
-    
+
     start_time = time.time()
-    
+
     # Check if agent is enabled
     if not settings.agent_enabled:
         return AgentTestResponse(
@@ -1038,12 +1016,13 @@ async def test_agent_execution(request: AgentTestRequest = AgentTestRequest()):
             execution_time_seconds=time.time() - start_time,
             error="Agent is disabled via AGENT_ENABLED flag",
         )
-    
+
     try:
         # Use provided CSV or create a small sample dataset
         if request.file_content:
             # Parse user-provided CSV content
             import io
+
             df = pd.read_csv(io.StringIO(request.file_content))
         else:
             # Create a tiny sample dataset for testing
@@ -1055,20 +1034,20 @@ async def test_agent_execution(request: AgentTestRequest = AgentTestRequest()):
                 "salary": [50000, 75000, 60000, 75000, 55000],
             }
             df = pd.DataFrame(sample_data)
-        
+
         # Limit rows for testing
         max_rows = min(request.sample_csv_rows or 10, len(df))
         df = df.head(max_rows)
-        
+
         # Prepare inputs for agent
         dataset_id = "test_dataset_001"
         file_name = "test_sample.csv"
         row_count = len(df)
         column_count = len(df.columns)
-        
+
         # Get sample rows
         sample_rows = df.head(5).to_dict(orient="records")
-        
+
         # Build column summaries
         column_summaries = []
         for col in df.columns:
@@ -1079,7 +1058,7 @@ async def test_agent_execution(request: AgentTestRequest = AgentTestRequest()):
                 "missing_count": int(df[col].isna().sum()),
             }
             column_summaries.append(col_summary)
-        
+
         # Step 1: Generate dataset understanding
         understanding = await generate_dataset_understanding(
             dataset_id=dataset_id,
@@ -1090,16 +1069,16 @@ async def test_agent_execution(request: AgentTestRequest = AgentTestRequest()):
             column_summaries=column_summaries,
             user_instructions="This is a test dataset for agent validation",
         )
-        
+
         # Step 2: Generate analysis issues
         analysis = await generate_analysis_issues(
             dataset_id=dataset_id,
             dataset_understanding=understanding.model_dump(),
             user_instructions="Identify any data quality issues",
         )
-        
+
         execution_time = time.time() - start_time
-        
+
         return AgentTestResponse(
             success=True,
             agent_enabled=True,
@@ -1107,11 +1086,11 @@ async def test_agent_execution(request: AgentTestRequest = AgentTestRequest()):
             understanding=understanding.model_dump(),
             analysis=analysis.model_dump(),
         )
-        
+
     except Exception as e:
         execution_time = time.time() - start_time
         logger.error(f"Agent test failed: {e}")
-        
+
         return AgentTestResponse(
             success=False,
             agent_enabled=settings.agent_enabled,

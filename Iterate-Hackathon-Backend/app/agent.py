@@ -46,6 +46,14 @@ class DatasetUnderstandingModel(BaseModel):
     suggested_context: str
 
 
+class InvestigationModel(BaseModel):
+    code: Optional[str] = None
+    success: Optional[bool] = None
+    output: Optional[Any] = None
+    error: Optional[str] = None
+    execution_time_ms: Optional[float] = None
+
+
 class IssueModel(BaseModel):
     id: str
     type: str
@@ -56,6 +64,7 @@ class IssueModel(BaseModel):
     category: Literal["quick_fixes", "smart_fixes"]
     affectedRows: Optional[int] = None
     temporalPattern: Optional[str] = None
+    investigation: Optional[InvestigationModel] = None
 
 
 class AnalysisResultModel(BaseModel):
@@ -314,7 +323,14 @@ You MUST return ONLY valid JSON matching this exact schema (no markdown, no code
       "suggestedAction": "What to do about this issue",
       "category": "quick_fixes|smart_fixes",
       "affectedRows": 123,
-      "temporalPattern": "optional temporal pattern description"
+      "temporalPattern": "optional temporal pattern description",
+      "investigation": {
+        "code": "Python code you ran to confirm the issue",
+        "success": true,
+        "output": {"example": 1},
+        "error": "optional error if code failed",
+        "execution_time_ms": 100.0
+      }
     }
   ],
   "summary": "Analysis complete. Found X issues.",
@@ -326,6 +342,7 @@ CONSTRAINTS:
 - category must be: quick_fixes or smart_fixes
 - Use quick_fixes for automated issues (missing values, duplicates)
 - Use smart_fixes for issues requiring user input
+- investigation must capture the exact Python you ran plus its output
 - IDs must be deterministic: {dataset_id}_{issue_slug}
 - Return ONLY the JSON, nothing else"""
 

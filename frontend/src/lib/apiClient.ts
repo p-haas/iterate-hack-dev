@@ -115,6 +115,17 @@ class APIClient {
     });
   }
 
+  async getAnalysisResult(datasetId: string): Promise<AnalysisResult | null> {
+    try {
+      return await this.request<AnalysisResult>(`/datasets/${datasetId}/analysis`);
+    } catch (error) {
+      if (error instanceof APIError && error.status === 404) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   async* streamAnalysis(datasetId: string): AsyncGenerator<StreamMessage> {
     const response = await fetch(`${this.baseURL}/datasets/${datasetId}/analysis/stream`);
 

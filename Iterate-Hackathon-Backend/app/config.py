@@ -14,6 +14,12 @@ class Settings(BaseSettings):
         "claude-haiku-4-5-20251001",
         env="CLAUDE_MODEL",
     )
+    
+    claude_code_exec_model: str = Field(
+        "claude-sonnet-4-5-20250929",
+        env="CLAUDE_CODE_EXEC_MODEL",
+        description="Model to use for code execution analysis (Sonnet 4.5 recommended)",
+    )
 
     # Agent execution settings
     agent_timeout_seconds: float = Field(
@@ -30,6 +36,11 @@ class Settings(BaseSettings):
         100000,
         env="AGENT_MAX_DATASET_ROWS",
         description="Maximum dataset size (rows) for agent processing",
+    )
+    agent_sample_rows: int = Field(
+        1000,
+        env="AGENT_SAMPLE_ROWS",
+        description="Maximum rows to send to Claude for code generation (larger datasets will be truncated)",
     )
     agent_enabled: bool = Field(
         True,

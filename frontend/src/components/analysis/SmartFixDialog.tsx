@@ -3,7 +3,6 @@ import { Brain } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Issue } from '@/types/dataset';
-import { cn } from '@/lib/utils';
 
 interface SmartFixDialogProps {
   issue: Issue | null;
@@ -13,59 +12,32 @@ interface SmartFixDialogProps {
 }
 
 export const SmartFixDialog = ({ issue, open, onOpenChange, onSubmit }: SmartFixDialogProps) => {
-  const [typedQuestion, setTypedQuestion] = useState('');
-  const [showButtons, setShowButtons] = useState<number>(0);
   const [customAnswer, setCustomAnswer] = useState('');
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
 
-  const questions = {
-    supplier_variations: 'Did something change in your business process, or is this data entry inconsistency?',
-    discount_context: 'How should we interpret these discount values?',
-    category_drift: 'Was this category change intentional or a data entry issue?',
+  const formatInvestigationValue = (value: unknown) => {
+    if (value === null || typeof value === 'undefined') {
+      return 'No investigation output provided.';
+    }
+    if (typeof value === 'string') {
+      return value;
+    }
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value);
+    }
   };
-
-  const examples = {
-    supplier_variations: 'Pharmax appears as: Pharmax, Pharmax Ltd, PHARMAX, Pharmax Ireland...',
-    discount_context: 'Discount column shows values without context: 10, 15, 20...',
-    category_drift: 'Categories changed over time: "Supplements" → "Health & Wellness"',
-  };
-
-  const question = issue ? questions[issue.type as keyof typeof questions] || '' : '';
 
   useEffect(() => {
     if (!open || !issue) {
-      setTypedQuestion('');
-      setShowButtons(0);
       setShowCustomInput(false);
       setSelectedOption(null);
       setCustomAnswer('');
       return;
     }
-
-    // Reset state when dialog opens
-    setTypedQuestion('');
-    setShowButtons(0);
-
-    // Typing animation
-    let currentIndex = 0;
-    const typingInterval = setInterval(() => {
-      if (currentIndex <= question.length) {
-        setTypedQuestion(question.slice(0, currentIndex));
-        currentIndex++;
-      } else {
-        clearInterval(typingInterval);
-        // Start showing buttons with stagger after typing completes
-        setTimeout(() => {
-          for (let i = 1; i <= 4; i++) {
-            setTimeout(() => setShowButtons(i), i * 200);
-          }
-        }, 300);
-      }
-    }, 40);
-
-    return () => clearInterval(typingInterval);
-  }, [open, issue, question]);
+  }, [open, issue]);
 
   const handleOptionClick = (option: string) => {
     setSelectedOption(option);
@@ -111,7 +83,10 @@ export const SmartFixDialog = ({ issue, open, onOpenChange, onSubmit }: SmartFix
           <div className="p-4 bg-muted rounded-lg animate-fade-in">
             <h4 className="font-semibold text-foreground mb-2">Anomaly Detected</h4>
             <p className="text-sm text-muted-foreground mb-2">
-              We found {issue.affectedRows?.toLocaleString()} {issue.description.toLowerCase()}
+              {issue.description}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Columns: {issue.affectedColumns.join(', ')} • Severity: {issue.severity}
             </p>
             {issue.temporalPattern && (
               <p className="text-xs text-muted-foreground italic">{issue.temporalPattern}</p>
@@ -119,45 +94,84 @@ export const SmartFixDialog = ({ issue, open, onOpenChange, onSubmit }: SmartFix
           </div>
 
           {/* Examples Section */}
-          <div 
-            className="p-4 rounded-lg border border-border animate-fade-in"
-            style={{ 
-              backgroundColor: 'hsl(var(--accent))',
-              animationDelay: '200ms',
-              animationFillMode: 'backwards'
-            }}
-          >
-            <h4 className="font-semibold text-foreground mb-2">Examples Found</h4>
-            <p className="text-sm text-muted-foreground">
-              {examples[issue.type as keyof typeof examples]}
-            </p>
-          </div>
-
-          {/* Typewriter Question */}
-          <div className="min-h-[60px]">
-            <p className="text-sm font-medium text-foreground">
-              {typedQuestion}
-              {typedQuestion.length < question.length && (
-                <span className="animate-pulse">|</span>
+          {issue.investigation && (
+            <div className="space-y-4">
+              {/* Evidence Examples */}
+              {issue.investigation.evidence && (
+                <div className="p-4 rounded-lg border border-primary/20 bg-primary/5">
+                  <h4 className="font-semibold text-foreground mb-3 text-sm uppercase tracking-wide flex items-center gap-2">
+                    <span className="text-primary">📋</span> Evidence-Based Examples
+                  </h4>
+                  {issue.investigation.evidence.pattern_description && (
+                    <p className="text-sm text-muted-foreground mb-3 italic">
+                      {issue.investigation.evidence.pattern_description}
+                    </p>
+                  )}
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div>
+                      <p className="text-xs font-semibold text-destructive uppercase mb-2">❌ Current (Problematic)</p>
+                      <ul className="space-y-1">
+                        {issue.investigation.evidence.examples_current.slice(0, 3).map((example, idx) => (
+                          <li key={idx} className="text-sm font-mono bg-destructive/10 px-2 py-1 rounded border border-destructive/20">
+                            {example}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="text-xs font-semibold text-green-600 dark:text-green-400 uppercase mb-2">✓ Should Be (Fixed)</p>
+                      <ul className="space-y-1">
+                        {issue.investigation.evidence.examples_fixed.slice(0, 3).map((example, idx) => (
+                          <li key={idx} className="text-sm font-mono bg-green-50 dark:bg-green-950 px-2 py-1 rounded border border-green-200 dark:border-green-800">
+                            {example}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                  {issue.investigation.evidence.fix_strategy && (
+                    <div className="mt-3 p-3 rounded bg-muted/50 border border-border">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase mb-1">Fix Strategy</p>
+                      <p className="text-sm text-foreground">{issue.investigation.evidence.fix_strategy}</p>
+                    </div>
+                  )}
+                </div>
               )}
+              
+              {/* Technical Details */}
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="p-4 rounded-lg border border-border bg-muted/40">
+                  <h4 className="font-semibold text-foreground mb-2 text-sm uppercase tracking-wide">Detector</h4>
+                  <pre className="text-xs whitespace-pre-wrap font-mono text-foreground max-h-48 overflow-auto">
+                    {issue.investigation.code || 'Not provided'}
+                  </pre>
+                </div>
+                <div className="p-4 rounded-lg border border-border bg-muted/40">
+                  <h4 className="font-semibold text-foreground mb-2 text-sm uppercase tracking-wide">Count</h4>
+                  <pre className="text-xs whitespace-pre-wrap font-mono text-foreground max-h-48 overflow-auto">
+                    {formatInvestigationValue(issue.investigation.output)}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="p-4 rounded-lg border border-dashed border-border">
+            <h4 className="font-semibold text-foreground mb-1">Business Input Needed</h4>
+            <p className="text-sm text-muted-foreground">
+              {issue.suggestedAction || 'Explain how this should be handled.'}
             </p>
           </div>
 
-          {/* Staggered Option Buttons */}
+          {/* Quick Reply Buttons */}
           <div className="grid grid-cols-2 gap-2">
             {options.map((option, index) => (
               <Button
                 key={option.key}
                 variant={selectedOption === option.key ? 'default' : 'outline'}
-                className={cn(
-                  'justify-start transition-all',
-                  showButtons > index ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2'
-                )}
-                style={{
-                  transition: 'opacity 0.3s ease-out, transform 0.3s ease-out',
-                }}
+                className="justify-start transition-all"
                 onClick={() => handleOptionClick(option.key)}
-                disabled={showButtons <= index}
+                disabled={!issue}
               >
                 {option.label}
               </Button>
@@ -188,10 +202,7 @@ export const SmartFixDialog = ({ issue, open, onOpenChange, onSubmit }: SmartFix
           <Button
             onClick={handleSubmit}
             disabled={!selectedOption || (selectedOption === 'custom' && !customAnswer.trim())}
-            className={cn(
-              'transition-all',
-              showButtons === 4 ? 'opacity-100 scale-100' : 'opacity-0 scale-95'
-            )}
+            className="transition-all"
           >
             Submit
           </Button>
