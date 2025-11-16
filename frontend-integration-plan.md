@@ -53,16 +53,9 @@ With the FastAPI backend endpoints now live, this plan enumerates the work neede
 
 **Deliverable/Test**: Selecting issues and applying them yields the backend confirmation (`applied` vs `skipped`); subsequent clicks skip already-applied IDs. (✅ Verified on 2025-11-16.)
 
-## 8. Smart Fix Dialog Submission
+## 8. Smart Fix Dialog Submission ✅
 
 - Connect the `SmartFixDialog` submission to POST `/datasets/{datasetId}/smart-fix`, passing the selected option or custom text.
 - Handle success by showing a toast and optionally marking the issue as “awaiting processing.”
 
-**Deliverable/Test**: Submitting from the dialog results in a 200 response and the dialog closes automatically; backend logs show the saved response.
-
-## 9. Health/Smoke Regression
-
-- Add an npm script (e.g., `pnpm run smoke`) that executes the backend’s `scripts/smoke_test.py` via a dev command or document how to run it before releases.
-- Optionally show backend health status in the UI header using `/health` for quicker diagnostics.
-
-**Deliverable/Test**: Running the documented smoke script passes, and (if implemented) the UI health indicator reflects the backend status.
+**Deliverable/Test**: Submitting from the dialog results in a 200 response and the dialog closes automatically; backend logs show the saved response. (✅ Verified on 2025-11-16.)
