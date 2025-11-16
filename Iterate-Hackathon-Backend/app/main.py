@@ -783,4 +783,9 @@ def chat_dataset(payload: ChatDatasetRequest):
     return ChatResponse(reply=reply)
 @app.get("/health")
 def health():
-    return {"status": "up"}
+    dataset_dirs = [p for p in DATA_DIR.iterdir() if p.is_dir()]
+    return {
+        "status": "up",
+        "datasets": len(dataset_dirs),
+        "latest_dataset": max((p.stat().st_mtime for p in dataset_dirs), default=None),
+    }
