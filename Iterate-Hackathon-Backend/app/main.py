@@ -1,5 +1,5 @@
 # app/main.py
-from typing import Any, AsyncGenerator, Dict, List, Literal, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, List, Literal, Optional, Tuple
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -139,7 +139,7 @@ class IssueResponse(BaseModel):
     affectedColumns: List[str]
     suggestedAction: str
     category: Literal["quick_fixes", "smart_fixes"]
-    accepted: Optional[bool] = False
+    accepted: Optional[bool] = None
     affectedRows: Optional[int] = None
     temporalPattern: Optional[str] = None
     investigation: Optional[InvestigationResult] = None
@@ -152,10 +152,28 @@ class AnalysisResultResponse(BaseModel):
     completedAt: str
 
 
+ProgressEventType = Literal["log", "progress", "issue", "complete"]
+
+
 class StreamMessageResponse(BaseModel):
-    type: Literal["log", "progress", "issue", "complete"]
+    type: ProgressEventType
     message: str
     timestamp: str
+    data: Optional[Any] = None
+
+
+class IssueDecisionRequest(BaseModel):
+    issueId: str
+    accepted: bool
+    reason: Optional[str] = None
+
+
+class IssueDecisionResponse(BaseModel):
+    dataset_id: str
+    issue_id: str
+    accepted: bool
+    reason: Optional[str] = None
+    updated_at: str
 
 
 class ApplyIssuesRequest(BaseModel):
@@ -294,7 +312,8 @@ def _load_analysis_result(dataset_id: str) -> AnalysisResultResponse:
             f"Aucune analyse enregistrée pour dataset_id={dataset_id}. Lancez /analysis avant d'appliquer des corrections."
         )
     data = json.loads(analysis_path.read_text(encoding="utf-8"))
-    return AnalysisResultResponse(**data)
+    result = AnalysisResultResponse(**data)
+    return _apply_issue_decisions(dataset_id, result)
 
 
 def _persist_applied_issues(dataset_id: str, applied: List[str]) -> None:
@@ -313,6 +332,123 @@ def _load_applied_issues(dataset_id: str) -> List[str]:
         return []
     data = json.loads(path.read_text(encoding="utf-8"))
     return data.get("applied", [])
+
+
+def _issue_decisions_path(dataset_id: str) -> Path:
+    return dataset_dir_path(DATA_DIR, dataset_id) / "issue_decisions.json"
+
+
+def _load_issue_decisions(dataset_id: str) -> Dict[str, Dict[str, Any]]:
+    path = _issue_decisions_path(dataset_id)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        logger.warning("issue_decisions.json is corrupted for %s", dataset_id)
+        return {}
+    return data.get("decisions", {})
+
+
+def _save_issue_decisions(dataset_id: str, decisions: Dict[str, Dict[str, Any]]) -> None:
+    path = _issue_decisions_path(dataset_id)
+    payload = {
+        "dataset_id": dataset_id,
+        "decisions": decisions,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _upsert_issue_decisions(
+    dataset_id: str,
+    updates: List[Tuple[str, bool, Optional[str]]],
+) -> Dict[str, Dict[str, Any]]:
+    if not updates:
+        return {}
+    decisions = _load_issue_decisions(dataset_id)
+    updated: Dict[str, Dict[str, Any]] = {}
+    for issue_id, accepted, reason in updates:
+        entry = {
+            "issue_id": issue_id,
+            "accepted": accepted,
+            "reason": reason,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        decisions[issue_id] = entry
+        updated[issue_id] = entry
+    _save_issue_decisions(dataset_id, decisions)
+    return updated
+
+
+def _apply_issue_decisions(
+    dataset_id: str, result: AnalysisResultResponse
+) -> AnalysisResultResponse:
+    decisions = _load_issue_decisions(dataset_id)
+    if not decisions:
+        return result
+    for issue in result.issues:
+        decision = decisions.get(issue.id)
+        if decision is not None:
+            issue.accepted = bool(decision.get("accepted"))
+        else:
+            issue.accepted = None
+    return result
+
+
+def _update_cleaning_plan(
+    dataset_id: str, analysis: Optional[AnalysisResultResponse] = None
+) -> None:
+    try:
+        dataset_dir = dataset_dir_path(DATA_DIR, dataset_id)
+    except FileNotFoundError:
+        return
+
+    if analysis is None:
+        try:
+            analysis = _load_analysis_result(dataset_id)
+        except FileNotFoundError:
+            return
+
+    decisions = _load_issue_decisions(dataset_id)
+    plan = {
+        "dataset_id": dataset_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "accepted": 0,
+            "rejected": 0,
+            "pending": 0,
+        },
+        "accepted": [],
+        "rejected": [],
+        "pending_issue_ids": [],
+    }
+
+    for issue in analysis.issues:
+        entry = {
+            "issue_id": issue.id,
+            "type": issue.type,
+            "category": issue.category,
+            "severity": issue.severity,
+            "affectedColumns": issue.affectedColumns,
+            "suggestedAction": issue.suggestedAction,
+            "detector_code": (issue.investigation.code if issue.investigation else None),
+            "decision_reason": decisions.get(issue.id, {}).get("reason"),
+        }
+        decision = decisions.get(issue.id)
+        if decision is None:
+            plan["pending_issue_ids"].append(issue.id)
+            plan["summary"]["pending"] += 1
+            continue
+        if decision.get("accepted"):
+            plan["accepted"].append(entry)
+            plan["summary"]["accepted"] += 1
+        else:
+            plan["rejected"].append(entry)
+            plan["summary"]["rejected"] += 1
+
+    plan_path = dataset_dir / "cleaning_plan.json"
+    plan_path.write_text(json.dumps(plan, indent=2), encoding="utf-8")
 
 
 def _persist_smart_fix_response(
@@ -536,72 +672,88 @@ def _format_sse_message(message: StreamMessageResponse) -> str:
 
 
 async def _analysis_stream_generator(
-    messages: List[StreamMessageResponse],
+    queue: "asyncio.Queue[Optional[StreamMessageResponse]]",
 ) -> AsyncGenerator[str, None]:
-    for message in messages:
+    while True:
+        message = await queue.get()
+        if message is None:
+            break
         yield _format_sse_message(message)
-        await asyncio.sleep(0.4)
-
-
-def _build_stream_messages(
-    dataset_id: str, df: pd.DataFrame
-) -> List[StreamMessageResponse]:
-    now = datetime.now(timezone.utc)
-    messages: List[StreamMessageResponse] = []
-
-    def push(msg_type: str, text: str) -> None:
-        messages.append(
-            StreamMessageResponse(
-                type=msg_type,  # type: ignore[arg-type]
-                message=text,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-            )
-        )
-
-    push("log", "Starting dataset analysis...")
-    push("progress", "Loading dataset into memory")
-    push("progress", f"Detecting missing values across {len(df.columns)} columns")
-    missing_columns = [col for col in df.columns if df[col].isna().any()]
-    if missing_columns:
-        push("issue", f"Missing data detected in {', '.join(missing_columns[:3])}")
-    duplicates = int(df.duplicated().sum())
-    if duplicates:
-        push("issue", f"Detected {duplicates} duplicate rows")
-    push("progress", "Generating cleaning recommendations")
-    push("complete", "Analysis complete")
-    return messages
 
 
 @app.get("/datasets/{dataset_id}/analysis/stream")
 async def stream_dataset_analysis(dataset_id: str):
     try:
-        metadata = load_dataset_metadata(DATA_DIR, dataset_id)
-        df = _load_dataframe(metadata)
+        load_dataset_metadata(DATA_DIR, dataset_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Erreur de lecture du dataset: {exc}"
-        ) from exc
 
-    messages = _build_stream_messages(dataset_id, df)
+    message_queue: "asyncio.Queue[Optional[StreamMessageResponse]]" = asyncio.Queue()
+
+    def enqueue(event_type: ProgressEventType, text: str) -> None:
+        message_queue.put_nowait(
+            StreamMessageResponse(
+                type=event_type,
+                message=text,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+    async def runner() -> None:
+        error_message: Optional[str] = None
+        enqueue("log", "Starting dataset analysis...")
+        try:
+            await _run_dataset_analysis(dataset_id, progress_callback=enqueue)
+        except HTTPException as exc:
+            error_message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+            logger.error("Analysis failed for %s: %s", dataset_id, error_message)
+        except Exception as exc:  # pragma: no cover - defensive guardrail
+            error_message = str(exc)
+            logger.exception("Unexpected failure during analysis for %s", dataset_id)
+        finally:
+            if error_message:
+                enqueue("log", f"Analysis failed: {error_message}")
+                enqueue("complete", "Analysis aborted. Please retry.")
+            else:
+                enqueue("complete", "Analysis complete. Fetching latest findings...")
+            await message_queue.put(None)
+
+    asyncio.create_task(runner())
+
     return StreamingResponse(
-        _analysis_stream_generator(messages),
+        _analysis_stream_generator(message_queue),
         media_type="text/event-stream",
     )
 
 
-async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
+async def _run_dataset_analysis(
+    dataset_id: str,
+    progress_callback: Optional[Callable[[ProgressEventType, str], None]] = None,
+) -> AnalysisResultResponse:
     """
     Run dataset analysis using Claude code execution (if enabled) or fallback to heuristics.
     """
     metadata = load_dataset_metadata(DATA_DIR, dataset_id)
+
+    def report(event_type: ProgressEventType, text: str) -> None:
+        if progress_callback:
+            try:
+                progress_callback(event_type, text)
+            except Exception:  # pragma: no cover - defensive guardrail
+                logger.debug("Progress callback failed: %s", text)
+
+    report("progress", "Loading dataset into memory")
     try:
         df = _load_dataframe(metadata)
     except Exception as exc:
+        report("log", f"Failed to read dataset: {exc}")
         raise HTTPException(
             status_code=500, detail=f"Erreur de lecture du dataset: {exc}"
         ) from exc
+    report(
+        "progress",
+        f"Dataset ready: {len(df):,} rows × {len(df.columns)} columns",
+    )
 
     context = load_dataset_context(DATA_DIR, dataset_id)
 
@@ -621,7 +773,7 @@ async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
                 # If no understanding yet, create minimal one
                 understanding = {
                     "summary": {
-                        "name": metadata.file_name,
+                        "name": metadata.get("original_filename", dataset_id),
                         "rowCount": len(df),
                         "columnCount": len(df.columns),
                         "description": "Dataset uploaded for analysis",
@@ -631,11 +783,13 @@ async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
 
             # Run code-based analysis
             logger.info(f"Running code-based analysis for {dataset_id}")
+            report("progress", "Invoking AI agent for deep data quality scan")
             analysis_result = await analyze_dataset_with_code(
                 dataset_id=dataset_id,
                 df=df,
                 dataset_understanding=understanding,
                 user_instructions=context.get("instructions", ""),
+                progress_callback=progress_callback,
             )
 
             # Convert to expected response format
@@ -651,18 +805,35 @@ async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
                 ),
             )
 
+            result = _apply_issue_decisions(dataset_id, result)
             _persist_analysis_result(DATA_DIR / dataset_id, result)
+            _update_cleaning_plan(dataset_id, result)
             logger.info(f"Code-based analysis complete: {len(issues)} issues found")
+            report(
+                "log",
+                f"Agent completed successfully with {len(issues)} issue(s) detected",
+            )
             return result
 
         except Exception as e:
             logger.error(f"Code-based analysis failed: {e}, falling back to heuristics")
+            report(
+                "log",
+                "Agent analysis failed or is unavailable. Running backup heuristics...",
+            )
             # Fall through to heuristics
 
     # Fallback: rule-based backup analysis
     logger.info(f"Using backup rule-based analysis for {dataset_id}")
+    report("progress", "Running backup rule-based detectors")
     backup_payload = run_backup_analysis(dataset_id, df)
     issues = [IssueResponse(**issue) for issue in backup_payload["issues"]]
+    for issue in issues:
+        impact = f"{issue.affectedRows:,} rows" if issue.affectedRows else "multiple rows"
+        report(
+            "issue",
+            f"{issue.type.replace('_', ' ').title()} flagged via heuristics ({impact})",
+        )
     result = AnalysisResultResponse(
         dataset_id=dataset_id,
         issues=issues,
@@ -670,7 +841,10 @@ async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
         completedAt=backup_payload["completedAt"],
     )
 
+    result = _apply_issue_decisions(dataset_id, result)
     _persist_analysis_result(DATA_DIR / dataset_id, result)
+    _update_cleaning_plan(dataset_id, result)
+    report("log", "Backup analysis cached to disk")
     return result
 
 
@@ -733,6 +907,17 @@ def apply_dataset_changes(dataset_id: str, payload: ApplyIssuesRequest):
 
     _persist_applied_issues(dataset_id, list(applied_before))
 
+    if applied_now:
+        _upsert_issue_decisions(
+            dataset_id,
+            [(issue_id, True, None) for issue_id in applied_now],
+        )
+        for issue in analysis.issues:
+            if issue.id in applied_now:
+                issue.accepted = True
+        _persist_analysis_result(DATA_DIR / dataset_id, analysis)
+        _update_cleaning_plan(dataset_id, analysis)
+
     message = f"Applied {len(applied_now)} issues; {len(skipped)} skipped"
 
     return ApplyIssuesResponse(
@@ -740,6 +925,48 @@ def apply_dataset_changes(dataset_id: str, payload: ApplyIssuesRequest):
         applied=applied_now,
         skipped=skipped,
         message=message,
+    )
+
+
+@app.post("/datasets/{dataset_id}/issues/decision", response_model=IssueDecisionResponse)
+def record_issue_decision(dataset_id: str, payload: IssueDecisionRequest):
+    try:
+        load_dataset_metadata(DATA_DIR, dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if not payload.issueId:
+        raise HTTPException(status_code=400, detail="issueId requis")
+
+    try:
+        analysis = _load_analysis_result(dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    issue_ids = {issue.id for issue in analysis.issues}
+    if payload.issueId not in issue_ids:
+        raise HTTPException(status_code=400, detail="issueId inconnu")
+
+    updated = _upsert_issue_decisions(
+        dataset_id,
+        [(payload.issueId, payload.accepted, payload.reason)],
+    )
+    decision_entry = updated[payload.issueId]
+
+    for issue in analysis.issues:
+        if issue.id == payload.issueId:
+            issue.accepted = payload.accepted
+            break
+
+    _persist_analysis_result(DATA_DIR / dataset_id, analysis)
+    _update_cleaning_plan(dataset_id, analysis)
+
+    return IssueDecisionResponse(
+        dataset_id=dataset_id,
+        issue_id=payload.issueId,
+        accepted=payload.accepted,
+        reason=payload.reason,
+        updated_at=decision_entry["updated_at"],
     )
 
 

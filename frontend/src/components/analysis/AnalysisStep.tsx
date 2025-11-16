@@ -26,6 +26,8 @@ export const AnalysisStep = () => {
   const [openCategory, setOpenCategory] = useState<'quick_fixes' | 'smart_fixes' | null>(null);
   const [selectedIssue, setSelectedIssue] = useState<Issue | null>(null);
   const [investigationIssue, setInvestigationIssue] = useState<Issue | null>(null);
+  const [decisionLoadingId, setDecisionLoadingId] = useState<string | null>(null);
+  const [decisionAction, setDecisionAction] = useState<'apply' | 'decision' | null>(null);
   const { datasetId, analysisResult, setAnalysisResult } = useDataset();
   const { toast } = useToast();
   const quickFixes = useMemo(() => analysisResult?.issues.filter(i => i.category === 'quick_fixes') ?? [], [analysisResult]);
@@ -67,6 +69,57 @@ export const AnalysisStep = () => {
     };
   }, [datasetId, analysisResult, isAnalyzing, setAnalysisResult, toast]);
 
+  const updateIssueAcceptance = (issueId: string, accepted: boolean | null) => {
+    setAnalysisResult(prev => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        issues: prev.issues.map(issue =>
+          issue.id === issueId ? { ...issue, accepted } : issue
+        ),
+      };
+    });
+  };
+
+  const persistIssueDecision = async (
+    issueId: string,
+    accepted: boolean,
+    reason?: string,
+    options?: { successTitle?: string; successDescription?: string; skipSpinner?: boolean },
+  ): Promise<boolean> => {
+    if (!datasetId) return false;
+    if (!options?.skipSpinner) {
+      setDecisionAction('decision');
+      setDecisionLoadingId(issueId);
+    }
+    try {
+      await apiClient.recordIssueDecision(datasetId, issueId, accepted, reason);
+      updateIssueAcceptance(issueId, accepted);
+      if (options?.successTitle || options?.successDescription) {
+        toast({
+          title: options.successTitle ?? 'Decision saved',
+          description: options.successDescription,
+        });
+      }
+      return true;
+    } catch (error) {
+      toast({
+        title: 'Failed to save decision',
+        description:
+          error instanceof Error
+            ? error.message
+            : 'Unable to record your choice',
+        variant: 'destructive',
+      });
+      return false;
+    } finally {
+      if (!options?.skipSpinner) {
+        setDecisionLoadingId(prev => (prev === issueId ? null : prev));
+        setDecisionAction(null);
+      }
+    }
+  };
+
   const handleStartAnalysis = async () => {
     if (!datasetId) return;
 
@@ -77,18 +130,20 @@ export const AnalysisStep = () => {
     setStreamLogs([]);
 
     try {
-      // Stream the analysis logs
       for await (const message of apiClient.streamAnalysis(datasetId)) {
         setStreamLogs(prev => [...prev, message]);
       }
 
-      // Get the final result
-      const result = await apiClient.analyzeDataset(datasetId);
-      setAnalysisResult(result);
-      
+      const latest = await apiClient.getAnalysisResult(datasetId);
+      if (!latest) {
+        throw new Error('Analysis finished without producing a result');
+      }
+
+      setAnalysisResult(latest);
+
       toast({
         title: 'Analysis complete',
-        description: `Found ${result.issues.length} data quality issues`,
+        description: `Found ${latest.issues.length} data quality issues`,
       });
     } catch (error) {
       toast({
@@ -110,6 +165,7 @@ export const AnalysisStep = () => {
         datasetId,
         quickFixes.map(issue => issue.id),
       );
+      result.applied.forEach(issueId => updateIssueAcceptance(issueId, true));
       toast({
         title: 'Quick fixes applied',
         description: result.message,
@@ -127,9 +183,14 @@ export const AnalysisStep = () => {
   };
 
   const handleQuickFix = async (issueId: string, apply: boolean) => {
+    if (!datasetId) return;
+
     if (apply) {
+      setDecisionAction('apply');
+      setDecisionLoadingId(issueId);
       try {
-        await apiClient.applyChanges(datasetId!, [issueId]);
+        const result = await apiClient.applyChanges(datasetId, [issueId]);
+        result.applied.forEach(id => updateIssueAcceptance(id, true));
         toast({
           title: 'Fix applied',
           description: 'The issue has been resolved successfully',
@@ -138,31 +199,64 @@ export const AnalysisStep = () => {
       } catch (error) {
         toast({
           title: 'Failed to apply fix',
-          description: 'There was an error applying the fix',
+          description:
+            error instanceof Error ? error.message : 'There was an error applying the fix',
           variant: 'destructive',
         });
+      } finally {
+        setDecisionLoadingId(prev => (prev === issueId ? null : prev));
+        setDecisionAction(null);
       }
     } else {
-      setSelectedIssue(null);
+      const success = await persistIssueDecision(issueId, false, undefined, {
+        successTitle: 'Fix skipped',
+        successDescription: 'We will not include this change in the cleaning script.',
+      });
+      if (success) {
+        setSelectedIssue(null);
+      }
     }
   };
 
   const handleSmartFixResponse = async (response: string) => {
     if (!datasetId || !selectedIssue) return;
 
+    setDecisionAction('decision');
+    setDecisionLoadingId(selectedIssue.id);
     try {
       await apiClient.submitSmartFix(datasetId, selectedIssue.id, response);
-      toast({
-        title: 'Response recorded',
-        description: 'Your answer has been captured for processing',
+      const saved = await persistIssueDecision(selectedIssue.id, true, response, {
+        skipSpinner: true,
       });
+      if (saved) {
+        toast({
+          title: 'Response recorded',
+          description: 'Your answer has been captured for processing',
+        });
+        setSelectedIssue(null);
+      }
     } catch (error) {
       toast({
         title: 'Failed to save response',
-        description: 'There was an error submitting your answer',
+        description:
+          error instanceof Error
+            ? error.message
+            : 'There was an error submitting your answer',
         variant: 'destructive',
       });
     } finally {
+      setDecisionLoadingId(prev => (prev === selectedIssue?.id ? null : prev));
+      setDecisionAction(null);
+    }
+  };
+
+  const handleSmartFixRejection = async () => {
+    if (!selectedIssue) return;
+    const success = await persistIssueDecision(selectedIssue.id, false, undefined, {
+      successTitle: 'Change rejected',
+      successDescription: 'We will exclude this smart fix from the cleaning script.',
+    });
+    if (success) {
       setSelectedIssue(null);
     }
   };
@@ -205,6 +299,19 @@ export const AnalysisStep = () => {
                 <Badge variant="outline" className="text-xs">
                   {issue.severity}
                 </Badge>
+                {typeof issue.accepted === 'boolean' && (
+                  <Badge
+                    variant={issue.accepted ? 'secondary' : 'outline'}
+                    className={cn(
+                      'text-xs',
+                      issue.accepted
+                        ? 'text-green-700 dark:text-green-300'
+                        : 'text-destructive border-destructive/50'
+                    )}
+                  >
+                    {issue.accepted ? 'Accepted' : 'Rejected'}
+                  </Badge>
+                )}
               </div>
               <p className="text-sm text-muted-foreground mb-2">
                 {affectedRowsText} • {issue.affectedColumns.join(', ')}
@@ -548,12 +655,39 @@ export const AnalysisStep = () => {
                     )}
                   </div>
                   <div className="flex justify-end gap-2 mt-6">
-                    <Button variant="outline" onClick={() => handleQuickFix(selectedIssue.id, false)}>
-                      No, skip
+                    <Button
+                      variant="outline"
+                      onClick={() => handleQuickFix(selectedIssue.id, false)}
+                      disabled={
+                        decisionLoadingId === selectedIssue.id && decisionAction !== 'apply'
+                      }
+                    >
+                      {decisionLoadingId === selectedIssue.id && decisionAction !== 'apply' ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Saving...
+                        </>
+                      ) : (
+                        'No, skip'
+                      )}
                     </Button>
-                    <Button onClick={() => handleQuickFix(selectedIssue.id, true)}>
-                      <CheckCircle2 className="w-4 h-4 mr-2" />
-                      Yes, fix it
+                    <Button
+                      onClick={() => handleQuickFix(selectedIssue.id, true)}
+                      disabled={
+                        decisionLoadingId === selectedIssue.id && decisionAction === 'apply'
+                      }
+                    >
+                      {decisionLoadingId === selectedIssue.id && decisionAction === 'apply' ? (
+                        <>
+                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          Applying...
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="w-4 h-4 mr-2" />
+                          Yes, fix it
+                        </>
+                      )}
                     </Button>
                   </div>
                 </>
@@ -664,6 +798,16 @@ export const AnalysisStep = () => {
             open={!!selectedIssue && selectedIssue.category === 'smart_fixes'}
             onOpenChange={(open) => !open && setSelectedIssue(null)}
             onSubmit={handleSmartFixResponse}
+            onReject={
+              selectedIssue?.category === 'smart_fixes'
+                ? handleSmartFixRejection
+                : undefined
+            }
+            decisionInProgress={
+              !!selectedIssue &&
+              selectedIssue.category === 'smart_fixes' &&
+              decisionLoadingId === selectedIssue.id
+            }
           />
         </>
       )}

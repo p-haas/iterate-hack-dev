@@ -62,3 +62,11 @@ export interface StreamMessage {
   timestamp: string;
   data?: any;
 }
+
+export interface IssueDecisionResponse {
+  dataset_id: string;
+  issue_id: string;
+  accepted: boolean;
+  reason?: string;
+  updated_at: string;
+}

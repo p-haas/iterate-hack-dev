@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Brain } from 'lucide-react';
+import { Brain, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Issue } from '@/types/dataset';
@@ -9,9 +9,11 @@ interface SmartFixDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (response: string) => Promise<void>;
+  onReject?: () => Promise<void> | void;
+  decisionInProgress?: boolean;
 }
 
-export const SmartFixDialog = ({ issue, open, onOpenChange, onSubmit }: SmartFixDialogProps) => {
+export const SmartFixDialog = ({ issue, open, onOpenChange, onSubmit, onReject, decisionInProgress }: SmartFixDialogProps) => {
   const [customAnswer, setCustomAnswer] = useState('');
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
@@ -49,11 +51,17 @@ export const SmartFixDialog = ({ issue, open, onOpenChange, onSubmit }: SmartFix
   };
 
   const handleSubmit = async () => {
+    if (decisionInProgress) return;
     if (selectedOption === 'custom' && customAnswer) {
       await onSubmit(customAnswer);
     } else if (selectedOption) {
       await onSubmit(selectedOption);
     }
+  };
+
+  const handleReject = () => {
+    if (decisionInProgress || !onReject) return;
+    void onReject();
   };
 
   if (!issue) return null;
@@ -192,19 +200,49 @@ export const SmartFixDialog = ({ issue, open, onOpenChange, onSubmit }: SmartFix
         </div>
 
         {/* Submit Button */}
-        <div className="flex justify-end gap-2 mt-6 pt-4 border-t">
-          <Button 
-            variant="outline" 
+        <div className="flex justify-end gap-2 mt-6 pt-4 border-t flex-wrap">
+          {onReject && (
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={handleReject}
+              disabled={decisionInProgress}
+              className="mr-auto"
+            >
+              {decisionInProgress ? (
+                <>
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                'Reject change'
+              )}
+            </Button>
+          )}
+          <Button
+            variant="outline"
             onClick={() => onOpenChange(false)}
+            disabled={decisionInProgress}
           >
             Cancel
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={!selectedOption || (selectedOption === 'custom' && !customAnswer.trim())}
+            disabled={
+              decisionInProgress ||
+              !selectedOption ||
+              (selectedOption === 'custom' && !customAnswer.trim())
+            }
             className="transition-all"
           >
-            Submit
+            {decisionInProgress ? (
+              <>
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                Saving...
+              </>
+            ) : (
+              'Submit'
+            )}
           </Button>
         </div>
       </DialogContent>

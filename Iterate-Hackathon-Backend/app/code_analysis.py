@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import anthropic
 import pandas as pd
@@ -18,6 +18,23 @@ from pydantic import BaseModel
 from .config import settings
 
 logger = logging.getLogger(__name__)
+
+ProgressCallback = Optional[
+    Callable[[Literal["log", "progress", "issue", "complete"], str], None]
+]
+
+
+def _emit_progress(
+    callback: ProgressCallback,
+    event_type: Literal["log", "progress", "issue", "complete"],
+    message: str,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(event_type, message)
+    except Exception:  # pragma: no cover - defensive guardrail
+        logger.debug("Progress callback failed for message: %s", message)
 
 # Conservative constants for sizing CSV payloads sent to code execution
 CSV_CHARS_PER_TOKEN = 2.0  # assume dense numerical/text CSV (tokens ~= chars / 2)
@@ -171,6 +188,7 @@ async def analyze_dataset_with_code(
     dataset_understanding: Dict[str, Any],
     user_instructions: str = "",
     max_sample_rows: Optional[int] = None,
+    progress_callback: ProgressCallback = None,
 ) -> Dict[str, Any]:
     """
     Analyze dataset using Claude's code execution tool.
@@ -200,18 +218,35 @@ async def analyze_dataset_with_code(
     use_sample = full_row_count > max_sample_rows
     
     if use_sample:
-        logger.info(f"Dataset has {full_row_count:,} rows. Sampling {max_sample_rows:,} rows for Claude.")
+        logger.info(
+            f"Dataset has {full_row_count:,} rows. Sampling {max_sample_rows:,} rows for Claude."
+        )
         df_sample = df.head(max_sample_rows)
     else:
-        logger.info(f"Dataset has {full_row_count:,} rows. Sending full dataset to Claude.")
+        logger.info(
+            f"Dataset has {full_row_count:,} rows. Sending full dataset to Claude."
+        )
         df_sample = df
+
+    _emit_progress(
+        progress_callback,
+        "progress",
+        f"Preparing {len(df_sample):,} rows for Claude (of {full_row_count:,} total)",
+    )
     
     # Additional safety: estimate token count and reduce sample if needed
     df_sample, actual_sample_size = _safe_sample_for_tokens(df_sample, max_sample_rows)
     if actual_sample_size < len(df_sample):
-        logger.warning(f"Further reduced sample to {actual_sample_size} rows to fit token limit")
+        logger.warning(
+            f"Further reduced sample to {actual_sample_size} rows to fit token limit"
+        )
         df_sample = df_sample.head(actual_sample_size)
         use_sample = True
+        _emit_progress(
+            progress_callback,
+            "progress",
+            f"Token budget enforced: using {len(df_sample):,} preview rows",
+        )
 
     # Prepare minimal dataset summary for the agent
     dataset_summary = {
@@ -275,6 +310,14 @@ Rules:
             or len(df_sample) < len(df)
             or bool(dropped_columns)
         )
+        _emit_progress(
+            progress_callback,
+            "progress",
+            (
+                f"Sending {len(df_sample):,} rows and {len(df_sample.columns)} columns to Claude "
+                f"(~{estimated_tokens:,.0f} tokens)"
+            ),
+        )
 
         logger.info(
             "Phase 1: Sending %s rows, %s columns to Claude (%.1f KB CSV, est %.0f tokens)",
@@ -336,12 +379,37 @@ df = pd.read_csv(StringIO('''{df_csv}'''))
 
         # Parse the JSON response
         result = _parse_analysis_response(final_text, dataset_id)
+        _emit_progress(
+            progress_callback,
+            "progress",
+            "Claude returned structured hypotheses; validating against full dataset",
+        )
         
         # PHASE 2: Execute detection scripts on full dataset (if sampled)
         if use_sample and result.get("issues"):
-            logger.info(f"Phase 2: Executing {len(result['issues'])} detection scripts on full dataset ({full_row_count:,} rows)")
-            result = await _execute_scripts_on_full_dataset(result, df, dataset_id)
-        
+            logger.info(
+                f"Phase 2: Executing {len(result['issues'])} detection scripts on full dataset ({full_row_count:,} rows)"
+            )
+            result = await _execute_scripts_on_full_dataset(
+                result,
+                df,
+                dataset_id,
+                progress_callback=progress_callback,
+            )
+        elif result.get("issues"):
+            # Even when not sampled, provide richer evidence on the full data
+            result = await _enrich_issues_with_evidence(
+                result,
+                df,
+                dataset_id,
+                progress_callback=progress_callback,
+            )
+
+        _emit_progress(
+            progress_callback,
+            "log",
+            f"Agent identified {len(result.get('issues', []))} issue(s)",
+        )
         return result
 
     except Exception as e:
@@ -353,6 +421,7 @@ async def _execute_scripts_on_full_dataset(
     analysis_result: Dict[str, Any],
     df_full: pd.DataFrame,
     dataset_id: str,
+    progress_callback: ProgressCallback = None,
 ) -> Dict[str, Any]:
     """
     Execute detection scripts from analysis on the full dataset.
@@ -367,11 +436,16 @@ async def _execute_scripts_on_full_dataset(
         Updated analysis result with counts from full dataset and evidence
     """
     updated_issues = []
-    
+    _emit_progress(
+        progress_callback,
+        "progress",
+        "Executing agent-authored scripts on full dataset",
+    )
+
     for issue in analysis_result.get("issues", []):
         investigation = issue.get("investigation", {})
         code = investigation.get("code", "")
-        
+
         if not code:
             # No code to execute, keep as-is
             updated_issues.append(issue)
@@ -408,7 +482,19 @@ async def _execute_scripts_on_full_dataset(
             
             updated_issues.append(issue)
             logger.info(f"Successfully executed script for {issue.get('id')}")
-            
+            affected = issue.get("affectedRows")
+            impact = (
+                f"{int(affected):,} rows"
+                if isinstance(affected, (int, float))
+                else "multiple rows"
+            )
+            columns = ", ".join(issue.get("affectedColumns", [])[:3]) or "dataset"
+            _emit_progress(
+                progress_callback,
+                "issue",
+                f"Validated {issue.get('type', 'issue')} in {columns} ({impact})",
+            )
+
         except Exception as e:
             logger.warning(f"Failed to execute script for issue {issue.get('id')}: {e}")
             # Keep original issue with note
@@ -416,16 +502,30 @@ async def _execute_scripts_on_full_dataset(
             investigation["executed_on_full_dataset"] = False
             issue["investigation"] = investigation
             updated_issues.append(issue)
-    
+            _emit_progress(
+                progress_callback,
+                "log",
+                f"Script execution failed for {issue.get('id')}: {e}",
+            )
+
     analysis_result["issues"] = updated_issues
     analysis_result["executed_on_full_dataset"] = True
-    
+
     # PHASE 3: Parse results with evidence-based formatting
     logger.info("Phase 3: Enriching issues with evidence-based formatting")
     analysis_result = await _enrich_issues_with_evidence(
-        analysis_result, df_full, dataset_id
+        analysis_result,
+        df_full,
+        dataset_id,
+        progress_callback=progress_callback,
     )
-    
+
+    _emit_progress(
+        progress_callback,
+        "progress",
+        "Finished executing detection scripts",
+    )
+
     return analysis_result
 
 
@@ -433,6 +533,7 @@ async def _enrich_issues_with_evidence(
     analysis_result: Dict[str, Any],
     df_full: pd.DataFrame,
     dataset_id: str,
+    progress_callback: ProgressCallback = None,
 ) -> Dict[str, Any]:
     """
     Use an output parser agent to enrich issues with evidence-based examples.
@@ -454,7 +555,12 @@ async def _enrich_issues_with_evidence(
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     
     enriched_issues = []
-    
+    _emit_progress(
+        progress_callback,
+        "progress",
+        "Extracting concrete evidence examples",
+    )
+
     for issue in analysis_result.get("issues", []):
         try:
             # Extract evidence from the dataset for this issue
@@ -477,8 +583,9 @@ async def _enrich_issues_with_evidence(
         except Exception as e:
             logger.warning(f"Failed to enrich issue {issue.get('id')} with evidence: {e}")
             enriched_issues.append(issue)  # Keep original
-    
+
     analysis_result["issues"] = enriched_issues
+    _emit_progress(progress_callback, "log", "Evidence enrichment complete")
     return analysis_result
 
 

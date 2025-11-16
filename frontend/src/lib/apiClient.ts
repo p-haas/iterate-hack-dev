@@ -1,4 +1,4 @@
-import { DatasetUnderstanding, AnalysisResult, StreamMessage } from '@/types/dataset';
+import { DatasetUnderstanding, AnalysisResult, StreamMessage, IssueDecisionResponse } from '@/types/dataset';
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const DEFAULT_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
@@ -170,6 +170,13 @@ class APIClient {
     return this.request<{ issue_id: string; response: string; updated_at: string }>(`/datasets/${datasetId}/smart-fix`, {
       method: 'POST',
       body: JSON.stringify({ issueId, response }),
+    });
+  }
+
+  async recordIssueDecision(datasetId: string, issueId: string, accepted: boolean, reason?: string): Promise<IssueDecisionResponse> {
+    return this.request<IssueDecisionResponse>(`/datasets/${datasetId}/issues/decision`, {
+      method: 'POST',
+      body: JSON.stringify({ issueId, accepted, reason }),
     });
   }
 }
