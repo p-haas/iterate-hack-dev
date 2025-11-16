@@ -625,7 +625,7 @@ class IssueModel(BaseModel):
 │  • No network access                                        │
 │  • No filesystem access                                     │
 │  • Pandas + NumPy available                                 │
-│  • 60-second timeout                                        │
+│  • 120-second timeout                                        │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
