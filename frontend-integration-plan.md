@@ -11,12 +11,12 @@ With the FastAPI backend endpoints now live, this plan enumerates the work neede
 
 **Deliverable/Test**: Updating `apiClient` compiles cleanly, and hitting `/health` via a temporary method confirms connectivity. (✅ Verified via console call returning `{ status: 'up', ... }` on 2025-11-16.)
 
-## 2. Dataset Upload Wiring
+## 2. Dataset Upload Wiring ✅
 
 - Update `uploadDataset` to POST `FormData` to `/datasets`, parse `dataset_id`, metadata, and propagate errors to the Upload step.
 - Ensure drag/drop UX uses the progress/loading states driven by the real response.
 
-**Deliverable/Test**: Uploading a CSV through the UI triggers a backend call (observable in network tab) and advances to the Understand step with the returned `datasetId`.
+**Deliverable/Test**: Uploading a CSV through the UI triggers a backend call (observable in network tab) and advances to the Understand step with the returned `datasetId`. (✅ Verified via 200 OK in uvicorn logs on 2025-11-16; Understanding step currently errors because downstream fetch isn’t wired yet, which will be addressed in Step 3.)
 
 ## 3. Understanding Step API Hook
 
