@@ -84,7 +84,12 @@ export const UnderstandingStep = () => {
   }
 
   if (!understanding) {
-    return <div>Error loading dataset</div>;
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center">
+        <p className="text-lg font-medium text-destructive mb-2">Unable to load dataset understanding.</p>
+        <Button variant="outline" onClick={loadUnderstanding}>Retry</Button>
+      </div>
+    );
   }
 
   return (

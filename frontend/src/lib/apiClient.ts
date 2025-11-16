@@ -71,59 +71,7 @@ class APIClient {
   }
 
   async getDatasetUnderstanding(datasetId: string): Promise<DatasetUnderstanding> {
-    await delay(2000);
-    // Mock data - would come from backend
-    return {
-      columns: [
-        {
-          name: 'customer_id',
-          dataType: 'string',
-          description: 'Unique identifier for each customer',
-          sampleValues: ['CUST001', 'CUST002', 'CUST003']
-        },
-        {
-          name: 'signup_date',
-          dataType: 'date',
-          description: 'Date when the customer signed up for the service',
-          sampleValues: ['2024-01-15', '2024-02-20', '2024-03-10']
-        },
-        {
-          name: 'monthly_revenue',
-          dataType: 'numeric',
-          description: 'Monthly recurring revenue from this customer in USD',
-          sampleValues: ['49.99', '99.99', '149.99']
-        },
-        {
-          name: 'plan_type',
-          dataType: 'categorical',
-          description: 'Subscription plan tier (Basic, Pro, Enterprise)',
-          sampleValues: ['Basic', 'Pro', 'Enterprise', 'basic', 'pro']
-        },
-        {
-          name: 'is_active',
-          dataType: 'boolean',
-          description: 'Whether the customer subscription is currently active',
-          sampleValues: ['true', 'false', '1', '0', 'yes']
-        },
-        {
-          name: 'churn_date',
-          dataType: 'date',
-          description: 'Date when customer cancelled their subscription (if applicable)',
-          sampleValues: ['2024-06-30', '', 'NULL', '2024-07-15']
-        }
-      ],
-      summary: {
-        name: datasetId,
-        description: 'This appears to be a SaaS customer subscription dataset tracking customer lifecycle and revenue metrics',
-        rowCount: 1247,
-        columnCount: 6,
-        observations: [
-          'Contains customer transaction and subscription data',
-          'Some inconsistencies detected in categorical values',
-          'Missing values present in churn_date column'
-        ]
-      }
-    };
+    return this.request<DatasetUnderstanding>(`/datasets/${datasetId}/understanding`);
   }
 
   async saveContext(datasetId: string, context: string, columnEdits?: any): Promise<void> {
