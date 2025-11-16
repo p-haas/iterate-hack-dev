@@ -77,18 +77,20 @@ export const AnalysisStep = () => {
     setStreamLogs([]);
 
     try {
-      // Stream the analysis logs
       for await (const message of apiClient.streamAnalysis(datasetId)) {
         setStreamLogs(prev => [...prev, message]);
       }
 
-      // Get the final result
-      const result = await apiClient.analyzeDataset(datasetId);
-      setAnalysisResult(result);
-      
+      const latest = await apiClient.getAnalysisResult(datasetId);
+      if (!latest) {
+        throw new Error('Analysis finished without producing a result');
+      }
+
+      setAnalysisResult(latest);
+
       toast({
         title: 'Analysis complete',
-        description: `Found ${result.issues.length} data quality issues`,
+        description: `Found ${latest.issues.length} data quality issues`,
       });
     } catch (error) {
       toast({

@@ -1,5 +1,5 @@
 # app/main.py
-from typing import Any, AsyncGenerator, Dict, List, Literal, Optional
+from typing import Any, AsyncGenerator, Callable, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -152,10 +152,14 @@ class AnalysisResultResponse(BaseModel):
     completedAt: str
 
 
+ProgressEventType = Literal["log", "progress", "issue", "complete"]
+
+
 class StreamMessageResponse(BaseModel):
-    type: Literal["log", "progress", "issue", "complete"]
+    type: ProgressEventType
     message: str
     timestamp: str
+    data: Optional[Any] = None
 
 
 class ApplyIssuesRequest(BaseModel):
@@ -536,72 +540,88 @@ def _format_sse_message(message: StreamMessageResponse) -> str:
 
 
 async def _analysis_stream_generator(
-    messages: List[StreamMessageResponse],
+    queue: "asyncio.Queue[Optional[StreamMessageResponse]]",
 ) -> AsyncGenerator[str, None]:
-    for message in messages:
+    while True:
+        message = await queue.get()
+        if message is None:
+            break
         yield _format_sse_message(message)
-        await asyncio.sleep(0.4)
-
-
-def _build_stream_messages(
-    dataset_id: str, df: pd.DataFrame
-) -> List[StreamMessageResponse]:
-    now = datetime.now(timezone.utc)
-    messages: List[StreamMessageResponse] = []
-
-    def push(msg_type: str, text: str) -> None:
-        messages.append(
-            StreamMessageResponse(
-                type=msg_type,  # type: ignore[arg-type]
-                message=text,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-            )
-        )
-
-    push("log", "Starting dataset analysis...")
-    push("progress", "Loading dataset into memory")
-    push("progress", f"Detecting missing values across {len(df.columns)} columns")
-    missing_columns = [col for col in df.columns if df[col].isna().any()]
-    if missing_columns:
-        push("issue", f"Missing data detected in {', '.join(missing_columns[:3])}")
-    duplicates = int(df.duplicated().sum())
-    if duplicates:
-        push("issue", f"Detected {duplicates} duplicate rows")
-    push("progress", "Generating cleaning recommendations")
-    push("complete", "Analysis complete")
-    return messages
 
 
 @app.get("/datasets/{dataset_id}/analysis/stream")
 async def stream_dataset_analysis(dataset_id: str):
     try:
-        metadata = load_dataset_metadata(DATA_DIR, dataset_id)
-        df = _load_dataframe(metadata)
+        load_dataset_metadata(DATA_DIR, dataset_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(
-            status_code=500, detail=f"Erreur de lecture du dataset: {exc}"
-        ) from exc
 
-    messages = _build_stream_messages(dataset_id, df)
+    message_queue: "asyncio.Queue[Optional[StreamMessageResponse]]" = asyncio.Queue()
+
+    def enqueue(event_type: ProgressEventType, text: str) -> None:
+        message_queue.put_nowait(
+            StreamMessageResponse(
+                type=event_type,
+                message=text,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+    async def runner() -> None:
+        error_message: Optional[str] = None
+        enqueue("log", "Starting dataset analysis...")
+        try:
+            await _run_dataset_analysis(dataset_id, progress_callback=enqueue)
+        except HTTPException as exc:
+            error_message = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+            logger.error("Analysis failed for %s: %s", dataset_id, error_message)
+        except Exception as exc:  # pragma: no cover - defensive guardrail
+            error_message = str(exc)
+            logger.exception("Unexpected failure during analysis for %s", dataset_id)
+        finally:
+            if error_message:
+                enqueue("log", f"Analysis failed: {error_message}")
+                enqueue("complete", "Analysis aborted. Please retry.")
+            else:
+                enqueue("complete", "Analysis complete. Fetching latest findings...")
+            await message_queue.put(None)
+
+    asyncio.create_task(runner())
+
     return StreamingResponse(
-        _analysis_stream_generator(messages),
+        _analysis_stream_generator(message_queue),
         media_type="text/event-stream",
     )
 
 
-async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
+async def _run_dataset_analysis(
+    dataset_id: str,
+    progress_callback: Optional[Callable[[ProgressEventType, str], None]] = None,
+) -> AnalysisResultResponse:
     """
     Run dataset analysis using Claude code execution (if enabled) or fallback to heuristics.
     """
     metadata = load_dataset_metadata(DATA_DIR, dataset_id)
+
+    def report(event_type: ProgressEventType, text: str) -> None:
+        if progress_callback:
+            try:
+                progress_callback(event_type, text)
+            except Exception:  # pragma: no cover - defensive guardrail
+                logger.debug("Progress callback failed: %s", text)
+
+    report("progress", "Loading dataset into memory")
     try:
         df = _load_dataframe(metadata)
     except Exception as exc:
+        report("log", f"Failed to read dataset: {exc}")
         raise HTTPException(
             status_code=500, detail=f"Erreur de lecture du dataset: {exc}"
         ) from exc
+    report(
+        "progress",
+        f"Dataset ready: {len(df):,} rows × {len(df.columns)} columns",
+    )
 
     context = load_dataset_context(DATA_DIR, dataset_id)
 
@@ -621,7 +641,7 @@ async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
                 # If no understanding yet, create minimal one
                 understanding = {
                     "summary": {
-                        "name": metadata.file_name,
+                        "name": metadata.get("original_filename", dataset_id),
                         "rowCount": len(df),
                         "columnCount": len(df.columns),
                         "description": "Dataset uploaded for analysis",
@@ -631,11 +651,13 @@ async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
 
             # Run code-based analysis
             logger.info(f"Running code-based analysis for {dataset_id}")
+            report("progress", "Invoking AI agent for deep data quality scan")
             analysis_result = await analyze_dataset_with_code(
                 dataset_id=dataset_id,
                 df=df,
                 dataset_understanding=understanding,
                 user_instructions=context.get("instructions", ""),
+                progress_callback=progress_callback,
             )
 
             # Convert to expected response format
@@ -653,16 +675,31 @@ async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
 
             _persist_analysis_result(DATA_DIR / dataset_id, result)
             logger.info(f"Code-based analysis complete: {len(issues)} issues found")
+            report(
+                "log",
+                f"Agent completed successfully with {len(issues)} issue(s) detected",
+            )
             return result
 
         except Exception as e:
             logger.error(f"Code-based analysis failed: {e}, falling back to heuristics")
+            report(
+                "log",
+                "Agent analysis failed or is unavailable. Running backup heuristics...",
+            )
             # Fall through to heuristics
 
     # Fallback: rule-based backup analysis
     logger.info(f"Using backup rule-based analysis for {dataset_id}")
+    report("progress", "Running backup rule-based detectors")
     backup_payload = run_backup_analysis(dataset_id, df)
     issues = [IssueResponse(**issue) for issue in backup_payload["issues"]]
+    for issue in issues:
+        impact = f"{issue.affectedRows:,} rows" if issue.affectedRows else "multiple rows"
+        report(
+            "issue",
+            f"{issue.type.replace('_', ' ').title()} flagged via heuristics ({impact})",
+        )
     result = AnalysisResultResponse(
         dataset_id=dataset_id,
         issues=issues,
@@ -671,6 +708,7 @@ async def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
     )
 
     _persist_analysis_result(DATA_DIR / dataset_id, result)
+    report("log", "Backup analysis cached to disk")
     return result
 
 
