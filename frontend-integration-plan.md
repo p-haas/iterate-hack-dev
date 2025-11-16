@@ -32,19 +32,19 @@ With the FastAPI backend endpoints now live, this plan enumerates the work neede
 
 **Deliverable/Test**: Entering instructions and pressing “Save & Continue” stores them; reloading the page shows the saved text via the GET endpoint. (✅ Verified on 2025-11-16.)
 
-## 5. Analysis Streaming
+## 5. Analysis Streaming ✅
 
 - Update `streamAnalysis` to consume the SSE endpoint `/datasets/{datasetId}/analysis/stream` (using `fetch` + `ReadableStream` or EventSource polyfill) and feed log entries to the Analysis Log UI.
 - Handle connection errors/retries gracefully.
 
-**Deliverable/Test**: Clicking “Run Analysis” shows the real-time messages emitted by the backend, matching the terminal `curl -N` output.
+**Deliverable/Test**: Clicking “Run Analysis” shows the real-time messages emitted by the backend, matching the terminal `curl -N` output. (✅ Verified on 2025-11-16 with backend SSE + POST /analysis.)
 
-## 6. Analysis Result Fetch
+## 6. Analysis Result Fetch ✅
 
 - Replace the mock `analyzeDataset` promise with a POST to `/datasets/{datasetId}/analysis` and map the returned JSON to `AnalysisResult`.
 - Ensure issue cards show the backend IDs, categories, and severities.
 
-**Deliverable/Test**: After the POST resolves, the issue counts in the UI match the backend response captured via the browser’s network tab.
+**Deliverable/Test**: After the POST resolves, the issue counts in the UI match the backend response captured via the browser’s network tab. (✅ Verified on 2025-11-16.)
 
 ## 7. Apply Fixes Button
 
