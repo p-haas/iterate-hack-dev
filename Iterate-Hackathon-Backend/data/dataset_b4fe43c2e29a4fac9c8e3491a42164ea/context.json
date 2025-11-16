@@ -1,8 +1,0 @@
-{
-  "dataset_id": "dataset_b4fe43c2e29a4fac9c8e3491a42164ea",
-  "instructions": "notes about this dataset",
-  "column_edits": {
-    "customer_id": "identifier"
-  },
-  "updated_at": "2025-11-16T00:48:50.991375+00:00"
-}
