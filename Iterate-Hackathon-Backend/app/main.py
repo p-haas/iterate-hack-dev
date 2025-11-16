@@ -1,11 +1,13 @@
 # app/main.py
-from typing import Any, List, Literal, Optional
+from typing import Any, AsyncGenerator, List, Literal, Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .chat import init_llm, chat_with_user
 from .dataset_store import (
+    dataset_dir_path,
     generate_dataset_id,
     infer_delimiter,
     load_dataset_metadata,
@@ -21,6 +23,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 import subprocess
 import sys
+import asyncio
+import json
 
 # Dossiers pour stocker fichiers + scripts
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -84,6 +88,54 @@ class DatasetContextResponse(BaseModel):
     instructions: str
     column_edits: Optional[Any] = None
     updated_at: str
+
+
+class IssueResponse(BaseModel):
+    id: str
+    type: Literal[
+        "missing_values",
+        "outliers",
+        "inconsistent_categories",
+        "invalid_dates",
+        "duplicates",
+        "whitespace",
+        "near_duplicates",
+        "supplier_variations",
+        "discount_context",
+        "category_drift",
+    ]
+    severity: Literal["low", "medium", "high"]
+    description: str
+    affectedColumns: List[str]
+    suggestedAction: str
+    category: Literal["quick_fixes", "smart_fixes"]
+    accepted: Optional[bool] = False
+    affectedRows: Optional[int] = None
+    temporalPattern: Optional[str] = None
+
+
+class AnalysisResultResponse(BaseModel):
+    dataset_id: str
+    issues: List[IssueResponse]
+    summary: str
+    completedAt: str
+
+
+class StreamMessageResponse(BaseModel):
+    type: Literal["log", "progress", "issue", "complete"]
+    message: str
+    timestamp: str
+
+
+class ApplyIssuesRequest(BaseModel):
+    issueIds: List[str]
+
+
+class ApplyIssuesResponse(BaseModel):
+    dataset_id: str
+    applied: List[str]
+    skipped: List[str]
+    message: str
 
 class ChatDatasetRequest(BaseModel):
     session_id: str
@@ -172,6 +224,112 @@ def _build_column_summary(series: pd.Series) -> ColumnSummary:
     )
 
 
+def _load_dataframe(metadata: dict) -> pd.DataFrame:
+    raw_path = resolve_raw_path(DATA_DIR, metadata)
+    file_type = metadata.get("file_type", "csv")
+    delimiter = metadata.get("delimiter") or ","
+
+    if file_type == "excel":
+        return pd.read_excel(raw_path)
+    return pd.read_csv(raw_path, delimiter=delimiter)
+
+
+def _generate_missing_value_issues(dataset_id: str, df: pd.DataFrame) -> List[IssueResponse]:
+    issues: List[IssueResponse] = []
+    for column in df.columns:
+        missing = int(df[column].isna().sum())
+        if missing == 0:
+            continue
+        ratio = missing / max(len(df), 1)
+        if ratio > 0.3:
+            severity = "high"
+        elif ratio > 0.1:
+            severity = "medium"
+        else:
+            severity = "low"
+        issue = IssueResponse(
+            id=f"{dataset_id}_missing_{column}",
+            type="missing_values",
+            severity=severity,  # type: ignore[arg-type]
+            description=f"{column} has {missing} missing values ({ratio:.1%}).",
+            affectedColumns=[column],
+            suggestedAction="Fill missing values using forward-fill, interpolation, or drop rows.",
+            category="quick_fixes",
+            affectedRows=missing,
+        )
+        issues.append(issue)
+    return issues
+
+
+def _generate_duplicate_issue(dataset_id: str, df: pd.DataFrame) -> Optional[IssueResponse]:
+    duplicate_rows = int(df.duplicated().sum())
+    if duplicate_rows == 0:
+        return None
+    severity = "medium" if duplicate_rows < len(df) * 0.1 else "high"
+    return IssueResponse(
+        id=f"{dataset_id}_duplicates",
+        type="duplicates",
+        severity=severity,  # type: ignore[arg-type]
+        description=f"Detected {duplicate_rows} duplicate rows.",
+        affectedColumns=list(df.columns),
+        suggestedAction="Remove or deduplicate rows based on business keys.",
+        category="quick_fixes",
+        affectedRows=duplicate_rows,
+    )
+
+
+def _generate_smart_fix_issue(dataset_id: str, context: Optional[dict]) -> Optional[IssueResponse]:
+    if not context:
+        return None
+    instructions = context.get("instructions") if isinstance(context, dict) else None
+    if not instructions:
+        return None
+
+    return IssueResponse(
+        id=f"{dataset_id}_context_alignment",
+        type="discount_context",
+        severity="medium",
+        description="Dataset requires human context to interpret business rules provided by the user.",
+        affectedColumns=list((context.get("column_edits") or {}).keys()) or ["*"],
+        suggestedAction="Review the provided instructions to ensure cleaning aligns with business intent.",
+        category="smart_fixes",
+        temporalPattern=None,
+    )
+
+
+def _persist_analysis_result(dataset_dir: Path, result: AnalysisResultResponse) -> None:
+    analysis_path = dataset_dir / "analysis.json"
+    analysis_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
+
+
+def _load_analysis_result(dataset_id: str) -> AnalysisResultResponse:
+    analysis_path = dataset_dir_path(DATA_DIR, dataset_id) / "analysis.json"
+    if not analysis_path.exists():
+        raise FileNotFoundError(
+            f"Aucune analyse enregistrée pour dataset_id={dataset_id}. Lancez /analysis avant d'appliquer des corrections."
+        )
+    data = json.loads(analysis_path.read_text(encoding="utf-8"))
+    return AnalysisResultResponse(**data)
+
+
+def _persist_applied_issues(dataset_id: str, applied: List[str]) -> None:
+    path = dataset_dir_path(DATA_DIR, dataset_id) / "applied_issues.json"
+    payload = {
+        "dataset_id": dataset_id,
+        "applied": applied,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _load_applied_issues(dataset_id: str) -> List[str]:
+    path = dataset_dir_path(DATA_DIR, dataset_id) / "applied_issues.json"
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    return data.get("applied", [])
+
+
 @app.get("/datasets/{dataset_id}/understanding", response_model=DatasetUnderstandingResponse)
 def get_dataset_understanding(dataset_id: str):
     try:
@@ -180,14 +338,8 @@ def get_dataset_understanding(dataset_id: str):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    file_type = metadata.get("file_type", "csv")
-    delimiter = metadata.get("delimiter") or ","
-
     try:
-        if file_type == "excel":
-            df = pd.read_excel(raw_path)
-        else:
-            df = pd.read_csv(raw_path, delimiter=delimiter)
+        df = _load_dataframe(metadata)
     except Exception as exc:  # pragma: no cover - runtime failure surfaced to caller
         raise HTTPException(status_code=500, detail=f"Erreur de lecture du dataset: {exc}") from exc
 
@@ -253,6 +405,145 @@ def save_dataset_context_endpoint(dataset_id: str, payload: DatasetContextReques
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return DatasetContextResponse(**context)
+
+
+def _format_sse_message(message: StreamMessageResponse) -> str:
+    return f"data: {message.model_dump_json() }\n\n"
+
+
+async def _analysis_stream_generator(messages: List[StreamMessageResponse]) -> AsyncGenerator[str, None]:
+    for message in messages:
+        yield _format_sse_message(message)
+        await asyncio.sleep(0.4)
+
+
+def _build_stream_messages(dataset_id: str, df: pd.DataFrame) -> List[StreamMessageResponse]:
+    now = datetime.now(timezone.utc)
+    messages: List[StreamMessageResponse] = []
+
+    def push(msg_type: str, text: str) -> None:
+        messages.append(
+            StreamMessageResponse(
+                type=msg_type,  # type: ignore[arg-type]
+                message=text,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+    push("log", "Starting dataset analysis...")
+    push("progress", "Loading dataset into memory")
+    push("progress", f"Detecting missing values across {len(df.columns)} columns")
+    missing_columns = [col for col in df.columns if df[col].isna().any()]
+    if missing_columns:
+        push("issue", f"Missing data detected in {', '.join(missing_columns[:3])}")
+    duplicates = int(df.duplicated().sum())
+    if duplicates:
+        push("issue", f"Detected {duplicates} duplicate rows")
+    push("progress", "Generating cleaning recommendations")
+    push("complete", "Analysis complete")
+    return messages
+
+
+@app.get("/datasets/{dataset_id}/analysis/stream")
+async def stream_dataset_analysis(dataset_id: str):
+    try:
+        metadata = load_dataset_metadata(DATA_DIR, dataset_id)
+        df = _load_dataframe(metadata)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Erreur de lecture du dataset: {exc}") from exc
+
+    messages = _build_stream_messages(dataset_id, df)
+    return StreamingResponse(
+        _analysis_stream_generator(messages),
+        media_type="text/event-stream",
+    )
+
+
+def _run_dataset_analysis(dataset_id: str) -> AnalysisResultResponse:
+    metadata = load_dataset_metadata(DATA_DIR, dataset_id)
+    try:
+        df = _load_dataframe(metadata)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Erreur de lecture du dataset: {exc}") from exc
+
+    context = load_dataset_context(DATA_DIR, dataset_id)
+    quick_fix_issues = _generate_missing_value_issues(dataset_id, df)
+    duplicate_issue = _generate_duplicate_issue(dataset_id, df)
+    smart_fix_issue = _generate_smart_fix_issue(dataset_id, context)
+
+    issues: List[IssueResponse] = quick_fix_issues
+    if duplicate_issue:
+        issues.append(duplicate_issue)
+    if smart_fix_issue:
+        issues.append(smart_fix_issue)
+
+    completed_at = datetime.now(timezone.utc).isoformat()
+    summary = f"Analysis complete. Found {len(issues)} data quality issues."
+
+    result = AnalysisResultResponse(
+        dataset_id=dataset_id,
+        issues=issues,
+        summary=summary,
+        completedAt=completed_at,
+    )
+
+    _persist_analysis_result(DATA_DIR / dataset_id, result)
+    return result
+
+
+@app.post("/datasets/{dataset_id}/analysis", response_model=AnalysisResultResponse)
+def analyze_dataset_endpoint(dataset_id: str):
+    try:
+        load_dataset_metadata(DATA_DIR, dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return _run_dataset_analysis(dataset_id)
+
+
+@app.post("/datasets/{dataset_id}/apply", response_model=ApplyIssuesResponse)
+def apply_dataset_changes(dataset_id: str, payload: ApplyIssuesRequest):
+    try:
+        load_dataset_metadata(DATA_DIR, dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if not payload.issueIds:
+        raise HTTPException(status_code=400, detail="Aucun issueId fourni.")
+
+    try:
+        analysis = _load_analysis_result(dataset_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    applied_before = set(_load_applied_issues(dataset_id))
+    available_ids = {issue.id for issue in analysis.issues}
+
+    applied_now: List[str] = []
+    skipped: List[str] = []
+
+    for issue_id in payload.issueIds:
+        if issue_id not in available_ids:
+            skipped.append(issue_id)
+            continue
+        if issue_id in applied_before:
+            skipped.append(issue_id)
+            continue
+        applied_before.add(issue_id)
+        applied_now.append(issue_id)
+
+    _persist_applied_issues(dataset_id, list(applied_before))
+
+    message = f"Applied {len(applied_now)} issues; {len(skipped)} skipped"
+
+    return ApplyIssuesResponse(
+        dataset_id=dataset_id,
+        applied=applied_now,
+        skipped=skipped,
+        message=message,
+    )
 
 
 @app.post("/chat", response_model=ChatResponse)

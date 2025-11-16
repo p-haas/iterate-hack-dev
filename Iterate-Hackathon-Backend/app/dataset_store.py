@@ -142,3 +142,10 @@ def load_dataset_context(data_dir: Path, dataset_id: str) -> Optional[dict]:
     context.setdefault("dataset_id", dataset_id)
     context.setdefault("instructions", "")
     return context
+
+
+def dataset_dir_path(data_dir: Path, dataset_id: str) -> Path:
+    path = data_dir / dataset_id
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset {dataset_id} introuvable")
+    return path
