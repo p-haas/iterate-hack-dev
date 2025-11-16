@@ -87,6 +87,7 @@ export const UnderstandingStep = () => {
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <p className="text-lg font-medium text-destructive mb-2">Unable to load dataset understanding.</p>
+        <p className="text-sm text-muted-foreground mb-4">Please try again or verify the dataset still exists on the server.</p>
         <Button variant="outline" onClick={loadUnderstanding}>Retry</Button>
       </div>
     );

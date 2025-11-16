@@ -53,7 +53,15 @@ class APIClient {
     return this.request<{ status: string }>('/health');
   }
 
-  async uploadDataset(file: File): Promise<{ datasetId: string }> {
+  async uploadDataset(file: File): Promise<{
+    datasetId: string;
+    fileName: string;
+    fileType: string;
+    fileSizeBytes: number;
+    delimiter?: string | null;
+    storagePath: string;
+    uploadedAt: string;
+  }> {
     const formData = new FormData();
     formData.append('file', file);
 
@@ -67,7 +75,16 @@ class APIClient {
       throw new APIError(errorText || 'Failed to upload dataset', response.status);
     }
 
-    return response.json();
+    const data = await response.json();
+    return {
+      datasetId: data.dataset_id,
+      fileName: data.file_name,
+      fileType: data.file_type,
+      fileSizeBytes: data.file_size_bytes,
+      delimiter: data.delimiter,
+      storagePath: data.storage_path,
+      uploadedAt: data.uploaded_at,
+    };
   }
 
   async getDatasetUnderstanding(datasetId: string): Promise<DatasetUnderstanding> {
