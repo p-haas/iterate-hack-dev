@@ -8,6 +8,10 @@
 [![Anthropic Claude](https://img.shields.io/badge/Claude-4.5_Haiku-8B5CF6?style=flat)](https://www.anthropic.com/)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
 
+## Demo Video
+
+https://www.youtube.com/watch?v=1goorzkSEI8 
+
 ---
 
 ## 🎯 The Problem: Data Cleaning is a Universal Bottleneck
